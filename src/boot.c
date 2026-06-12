@@ -12,6 +12,19 @@
 #include "recomp/gen/recomp_all.h"
 #include <stdio.h>
 #include <stdlib.h>
+#ifdef _WIN32
+#include <windows.h>
+/* Watchdog: the deep init still hits a busy-wait (data-setup WIP), so guarantee
+ * the boot terminates. Override with DINO_WATCHDOG seconds. */
+static DWORD WINAPI watchdog(LPVOID arg) {
+    int secs = arg ? *(int *)arg : 8;
+    Sleep((DWORD)secs * 1000);
+    fprintf(stderr, "[watchdog] %ds elapsed — boot still running, exiting\n", secs);
+    fflush(stderr);
+    recomp_dump_misses("work/dino_misses.txt");
+    _exit(3);
+}
+#endif
 
 int main(int argc, char **argv) {
     const char *exe = argc > 1 ? argv[1] : "original/DINOPARK.EXE";
@@ -23,11 +36,16 @@ int main(int argc, char **argv) {
 
     printf("booting recompiled DinoPark from entry %04X:%04X...\n", cpu.cs, cpu.ip);
     fflush(stdout);
+#ifdef _WIN32
+    static int wd_secs; { const char *e = getenv("DINO_WATCHDOG"); wd_secs = e ? atoi(e) : 8; }
+    CreateThread(NULL, 0, watchdog, &wd_secs, 0, NULL);
+#endif
 
     /* enter the lifted Borland startup at image offset 0 */
     extern void fn_00000(CPU *cpu);
     fn_00000(&cpu);
 
     printf("startup returned (halted=%d, AX=%04X)\n", cpu.halted, cpu.ax);
+    recomp_dump_misses("work/dino_misses.txt");
     return 0;
 }

@@ -29,16 +29,31 @@ work\dino_boot.exe          # loads the image, runs the recompiled startup
   (`lifter.dispatch=True` → `recomp_dispatch` reads the function pointer from
   memory and calls the target by address). It boots cleanly — no crash.
 
-## The two blockers between here and the game loop
+## Convergence harness + the current frontier
 
-1. **Function-pointer table init.** `main` walks init/atexit-style tables and
-   calls through them; right now most entries read uninitialized memory
-   (`[disp] MISS 5E1F:0701`…), so the init routines don't run. The startup's
-   table-copy / BSS setup needs to land correctly first.
-2. **Mid-function dispatch (jump tables).** Some indirect targets are *inside*
-   functions (computed `jmp`/switch tables, e.g. `0x1C0F`), which a
-   function-start dispatch can't enter. These targets must be registered as their
-   own functions (the bolo approach).
+The indirect-call misses are addressed by an **iterative convergence loop**:
+`recomp_dispatch` records in-range misses → `recomp_dump_misses` writes them to
+`work/dino_misses.txt` → `lift_full.py` reads them back as forced function starts
+(mid-function jump-table / init-routine entry points) → re-lift → repeat.
+
+Round 1 found **5 in-range misses** — all mid-function targets (e.g. `0x1C0F` =
+`+0x23` into `fn_01BEC`). Registering them lets the boot run **much** deeper:
+~**264 indirect dispatches** through the game's init.
+
+**The frontier now is data-setup correctness.** Past the first init routines, the
+dispatch starts reading *garbage* function pointers — e.g. `06EC:8B55`, whose
+bytes `55 8B EC` are `push bp; mov bp,sp`, i.e. a pointer landing in **code**. So
+some structure is read with the wrong segment/offset or before it's initialized,
+and the game enters a **busy-wait** on bad state. Safeguards keep the boot
+bounded:
+- a **dispatch budget** (`DINO_BUDGET`, default 200k) for dispatch-driven spins;
+- a **watchdog thread** (`DINO_WATCHDOG`, default 8s) that force-exits any
+  non-dispatch busy-wait.
+
+Next debugging pass: confirm `DS=DGROUP (0x3020)` holds across the init calls,
+verify the BSS clear / initialized-data layout, and trace which structure yields
+the first code-pointer — that's what turns "runs 264 init dispatches" into "loads
+the title". Debug env: `DINO_TRACE=1` (dispatch), `DINO_DBG=1` (INT 21h).
 
 ## The runtime so far (`runtime16.c`)
 

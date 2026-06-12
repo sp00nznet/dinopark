@@ -50,6 +50,19 @@ def main():
     except Exception:
         pass
 
+    # Iterative bring-up: dispatch misses from the previous boot become forced
+    # function starts (mid-function jump-table / init-routine targets). These
+    # overlap existing functions; the lifter handles that fine.
+    miss_path = os.path.join(ROOT, "work", "dino_misses.txt")
+    forced_targets = set()
+    if os.path.exists(miss_path):
+        for line in open(miss_path):
+            line = line.strip()
+            if line:
+                t = int(line, 16)
+                if t not in starts and 0 < t < max(det_end.values()):
+                    forced_targets.add(t)
+
     funcs = [("fn_00000", 0, first_det)]                # whole startup (jmp labels)
     ct = sorted(call_tgts)
     for i, s in enumerate(ct):                          # call-target subroutines
@@ -57,6 +70,14 @@ def main():
         funcs.append((f"fn_{s:05X}", s, end))
     for s in sorted(starts):
         funcs.append((f"fn_{s:05X}", s, det_end[s]))
+    # forced miss-targets: span to the next detected/forced start
+    allpts = sorted(starts | forced_targets)
+    for s in sorted(forced_targets):
+        i = allpts.index(s)
+        end = allpts[i + 1] if i + 1 < len(allpts) else max(det_end.values())
+        funcs.append((f"fn_{s:05X}", s, end))
+    if forced_targets:
+        print(f"  forced miss-target functions: {len(forced_targets)}")
     # de-dup by start (detected funcs win their real end)
     seen = {}
     for name, s, e in funcs:
@@ -113,21 +134,44 @@ def main():
             f.write(f"  {{0x{io:05X}, {name}}},\n")
         f.write("};\n\n")
         f.write(f"#define N_DISP {len(names)}\n")
+        f.write(f"#define CODE_END 0x{first_det:05X}u  /* startup end; real code begins here */\n")
+        f.write(f"#define CODE_TOP 0x{max(io for _, io, _ in funcs):05X}u\n")
         f.write("""
 static int g_disp_trace = -1;
 static int g_disp_depth = 0;
+/* in-range dispatch misses, deduped, dumped for the next lift round */
+#define MAXMISS 4096
+static unsigned g_miss[MAXMISS]; static int g_nmiss;
+static void note_miss(unsigned addr) {
+    if (addr < CODE_END || addr > CODE_TOP) return;   /* code range only */
+    for (int i = 0; i < g_nmiss; i++) if (g_miss[i] == addr) return;
+    if (g_nmiss < MAXMISS) g_miss[g_nmiss++] = addr;
+}
+void recomp_dump_misses(const char *path) {
+    FILE *f = fopen(path, "w"); if (!f) return;
+    for (int i = 0; i < g_nmiss; i++) fprintf(f, "%05X\\n", g_miss[i]);
+    fclose(f);
+    fprintf(stderr, "[disp] %d distinct in-range misses -> %s\\n", g_nmiss, path);
+}
+
+/* total dispatch budget: deep init currently runs into garbage function
+   pointers (uninitialized data) and would spin forever — cap it so the boot
+   always terminates while that data-setup work is in progress. */
+static long g_disp_budget = -1;
 /* indirect call/jmp by (seg,off): linear = seg*16+off (image space) */
 void recomp_dispatch(CPU *cpu, unsigned seg, unsigned off) {
     unsigned addr = ((seg << 4) + off) & 0xFFFFF;
     if (g_disp_trace < 0) g_disp_trace = getenv("DINO_TRACE") ? 1 : 0;
-    /* addr 0 = an uninitialized function pointer; never re-enter the startup. */
-    if (addr == 0) return;
+    if (g_disp_budget < 0) { const char *e = getenv("DINO_BUDGET"); g_disp_budget = e ? atol(e) : 200000; }
+    if (addr == 0) return;                              /* uninitialized fnptr */
+    if (--g_disp_budget <= 0) { cpu->halted = 1; return; }
     if (g_disp_depth > 240) { if (g_disp_trace) fprintf(stderr, "[disp] depth cap\\n"); return; }
     for (int i = 0; i < N_DISP; i++)
         if (g_disp[i].addr == addr) {
             if (g_disp_trace) fprintf(stderr, "[disp] -> fn_%05X\\n", addr);
             g_disp_depth++; g_disp[i].fn(cpu); g_disp_depth--; return;
         }
+    note_miss(addr);
     if (g_disp_trace) fprintf(stderr, "[disp] MISS %04X:%04X (lin 0x%05X)\\n", seg, off, addr);
 }
 """)

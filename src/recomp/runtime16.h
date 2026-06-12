@@ -24,6 +24,7 @@ void    port_out8(CPU *cpu, uint16_t port, uint8_t val);
 
 /* address-indirect call/jmp dispatch (generated in recomp_dispatch.c) */
 void recomp_dispatch(CPU *cpu, unsigned seg, unsigned off);
+void recomp_dump_misses(const char *path);   /* in-range dispatch misses -> file */
 
 /* boot: load the image + relocations into cpu->mem and seed segment regs */
 int  dino_load_image(CPU *cpu, const char *path);
