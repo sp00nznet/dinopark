@@ -136,14 +136,16 @@ in parallel — see [`docs/FORMATS.md`](docs/FORMATS.md) (WIP).
   (`FUN_1000_0e50` + register-arg helpers) and a **self-modifying, jump-table
   planar-VGA blitter** (`FUN_191d_0bf7`) that even Ghidra can't fully decompile.
   Per-sprite header is `width,height` (ALBERT 62×43). See [`docs/CODEC.md`](docs/CODEC.md).
-- ⚙️ **Phase 4 — the lift is live:** stood up the **recomp16** pipeline and
-  **lifted the DPCM decoder group to C** (`tools/lift_dinopark.py` →
-  `fn_0E50`+3 helpers). It **compiles and *executes natively*** on a real
-  `ALBERT.ACT` sprite — the first DinoPark machine code running as recompiled C,
-  no emulator. Correct full-sprite framing needs the loader (`FUN_1862_0797`)
-  lifted too — the remaining step before the dino renders. See [`docs/PHASE4.md`](docs/PHASE4.md).
-- ⏭️ **Next:** lift the sprite loader so the decoder gets loader-correct input →
-  render a dinosaur to PNG *from the recompiled code*; then the actor script VM.
+- ⚙️ **Phase 4 — the lift is live, and it renders:** stood up the **recomp16**
+  pipeline and lifted the decode functions to C (`tools/lift_dinopark.py`). The
+  lifted **`fn_1907`** RLE blitter (from `FUN_1907_00be`), executed natively on the
+  recomp16 CPU model, **decodes `AUCTION.PIC` into the full 320×200 auction-hall
+  screen** — the first DinoPark image rendered *by recompiled code*, no emulator.
+  (Tracing the loader also revealed the `.ACT` dino actors use a separate
+  self-modifying VGA blitter; the `.PIC`/`.ABT` art uses the RLE path we lifted.)
+  See [`docs/PHASE4.md`](docs/PHASE4.md).
+- ⏭️ **Next:** trace the VGA DAC palette for full color; lift the self-modifying
+  planar blitter for the `.ACT` dinosaurs; then push toward a playable bring-up.
 
 ---
 

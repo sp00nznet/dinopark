@@ -4,6 +4,21 @@ Goal: stop hand-porting the sprite codec and instead **lift the original decode
 functions to C and execute them** — the static-recomp way. This phase stands up
 the `recomp16` pipeline for DinoPark and proves it runs real game code natively.
 
+## 🎉 Milestone: a DinoPark screen, rendered by recompiled code
+
+`fn_1907` — the lifted **`FUN_1907_00be`** RLE blitter — running on the recomp16
+CPU model decodes `AUCTION.PIC` into the full **320×200** auction-hall screen
+(attendees in chairs, columns, wall sconces, the auction stage). No emulator, no
+interpreter: the original 16-bit blit logic, recompiled to C, executed natively.
+
+```
+scripts\build_pic.ps1 original\AUCTION.PIC   # lift -> cl -> decode -> render
+# -> work/pic_render.png  (gitignored: it is decoded copyrighted game art)
+```
+
+(Rendered grayscale-by-index for now — the VGA DAC palette is programmed at
+runtime and not yet traced. The image is fully legible without it.)
+
 ## What works ✅
 
 The DPCM sprite decoder group is **lifted and executing as native C**:
