@@ -131,8 +131,13 @@ in parallel — see [`docs/FORMATS.md`](docs/FORMATS.md) (WIP).
   table, employee-hiring and finance screens; **cracked the `UNC` asset container
   family — `UNC2` actor format 100% solved (55/55 files)**, `UNCP` pictures mapped.
   See [`docs/PHASE2.md`](docs/PHASE2.md) and [`docs/FORMATS.md`](docs/FORMATS.md).
-- ⏭️ **Next (Phase 3):** decode the LZSP sprite codec (render a real dino to PNG),
-  reverse the actor script VM, Ghidra/IDA far-pointer cross-seed, begin lifting.
+- 🔬 **Phase 3 — codec located (Ghidra):** imported + decompiled all 839 functions;
+  **found the real sprite codec** — it's **opcode-driven DPCM** (not plain RLE),
+  decoded by `FUN_1000_0e50`/helpers and blitted via the VGA planar path
+  `FUN_191d_08fb`. Per-sprite header is `width,height` (ALBERT 62×43). See
+  [`docs/CODEC.md`](docs/CODEC.md).
+- ⏭️ **Next:** port the DPCM decoder + VGA palette to render a real dinosaur to PNG,
+  reverse the actor script VM, then begin lifting.
 
 ---
 

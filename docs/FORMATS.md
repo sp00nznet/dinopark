@@ -34,9 +34,11 @@ u32 entries (file tail = `sprite_count × 4`), monotonic, first entry = 14.
 Examples: `ALBERT` 11 sprites, `BTNS` 77, `DINOMART` 91, `AUCTION` 109,
 `PARK` 138.
 
-- **Sprites** are **LZ-compressed** (`ReadActLZSP, sprite = %d`). The LZSP codec
-  + per-sprite bitmap header (likely `width,height` then RLE/LZ pixels) is the
-  next layer to reverse — see Phase 3.
+- **Sprites** are **compressed** (`ReadActLZSP, sprite = %d`). Per-sprite header
+  starts with `u16 width, u16 height` (constant across an actor's frames:
+  ALBERT 62×43, TREX 43×40). The pixel codec is **opcode-driven DPCM**, not plain
+  RLE — decoded by `FUN_1000_0e50` (+ helpers) and blitted via the VGA planar
+  path `FUN_191d_08fb`. Full breakdown in [`CODEC.md`](CODEC.md).
 - Some actors also carry **scripts** (`script count`/`script size`) driving the
   actor **bytecode VM** (`Unknown opcode error. opcode: …`); located via the
   `+10` flags region. Opcode set TBD.
