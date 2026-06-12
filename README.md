@@ -144,8 +144,15 @@ in parallel — see [`docs/FORMATS.md`](docs/FORMATS.md) (WIP).
   (Tracing the loader also revealed the `.ACT` dino actors use a separate
   self-modifying VGA blitter; the `.PIC`/`.ABT` art uses the RLE path we lifted.)
   See [`docs/PHASE4.md`](docs/PHASE4.md).
-- ⏭️ **Next:** trace the VGA DAC palette for full color; lift the self-modifying
-  planar blitter for the `.ACT` dinosaurs; then push toward a playable bring-up.
+- 🎨 **Palette traced:** mapped the full DAC pipeline (`FUN_191d_1b1c` writer ←
+  `FUN_1f0b_1140` ← the 6-bit buffer `DAT_4020_9dbf`). Finding: DinoPark **builds
+  its palette procedurally at runtime** (fades, color-cycling, screen-effect
+  patches) — no static palette blob in the EXE, assets, or `.PIC`s, and it's not
+  the stock VGA palette. So full color needs the palette-build path *executed*;
+  render is grayscale-by-index for now (fully legible). See [`docs/PALETTE.md`](docs/PALETTE.md).
+- ⏭️ **Next:** lift the screen-setup/palette-init path to capture `DAT_4020_9dbf`
+  (→ color); lift the self-modifying planar blitter for the `.ACT` dinosaurs;
+  then push toward a playable bring-up.
 
 ---
 
