@@ -118,12 +118,20 @@ in parallel — see [`docs/FORMATS.md`](docs/FORMATS.md) (WIP).
 
 ## Status
 
-🚧 **Phase 0 done — the patient is unpacked and on the table.**
+🚧 **Phase 1 done — decoded and mapped.**
 
 - ✅ Rights situation researched (see below) — abandonware; **no game files shipped here**.
-- ✅ Binary triaged: unpacked Borland-C 16-bit DOS exe, Miles audio, 4,139 relocs.
+- ✅ Binary triaged: unpacked Borland-C 16-bit DOS exe, **large model**, Miles audio.
 - ✅ Project scaffolded on the [pcrecomp toolkit](https://github.com/sp00nznet/pcrecomp).
-- ⏭️ **Next:** decode `DINOPARK.EXE`, build the function/call-graph map, begin lifting.
+- ✅ **Decoded & mapped: 693 functions, 75,175 instructions, 883 strings.** Large-model
+  call graph completed — **3,609/3,611 far calls resolved (99.9%)**. Code/data boundary
+  pinned at `0x34031`. See [`docs/FUNCTIONS.md`](docs/FUNCTIONS.md).
+- ✅ **Architecture discovered:** an **actor script VM** (`.ACT` bytecode), **LZ-packed
+  sprites**, and Miles XMI music. See [`docs/FORMATS.md`](docs/FORMATS.md).
+- ✅ **Upstreamed** the large-model call-graph + code/data-boundary logic to
+  [`pcrecomp/disasm/largemodel16.py`](https://github.com/sp00nznet/pcrecomp).
+- ⏭️ **Next (Phase 2):** classify the Borland runtime layer, string→function naming,
+  reverse the `.ACT` script VM, begin lifting game logic.
 
 ---
 
