@@ -1,30 +1,64 @@
-# Asset Formats (WIP)
+# Asset Formats
 
-Reverse-engineered from `DINOPARK.EXE` loader strings (Phase 1) and confirmed
-against the asset bytes in Phase 2. Bring your own game files into `original/`.
+Reverse-engineered from `DINOPARK.EXE` loader strings (Phase 1) and **confirmed
+against the real asset bytes** (Phase 2, `tools/unc_parse.py`). Bring your own
+game files into `original/`.
 
-## `.ACT` — actors / animations
+## The `UNC` container family
 
-The workhorse format (57 files; one per dinosaur and screen). Loaded by
-`ReadAct`. Structure inferred from loader error strings:
+Every graphics file starts with a 4-char `UNC?` magic, validated by the engine's
+`ReadAct` / `ReadPic` (`Unrecognized header '%4.4s'`). Three tags seen across 82
+files:
+
+| Magic | Ext | Files | What |
+|-------|-----|------:|------|
+| `UNC2` | `.ACT` | 55 | Actor sprite set (the workhorse — every dino, screen, UI) |
+| `UNCS` | `.ACT` | 2 | Actor variant (`BUS`, `PEOPLE`) — inline dimension table |
+| `UNCP` | `.PIC` | 25 | Picture (full-screen background or multi-image atlas) |
+
+## `UNC2` — actor sprite set ✅ **solved (55/55 validated)**
 
 ```
-header   : 4-char magic, validated ("ReadAct:Unrecognized header '%4.4s'")
-sprites  : sprite count, then sprites (some LZ-packed -> "ReadActLZSP, sprite=%d")
-brushes  : "brush start" offset/table
-scripts  : script count, script size  -> bytecode for the actor VM
+ +0   char[4]  "UNC2"
+ +4   u16      sprite_count
+ +6   u32      table_off          ; -> trailing per-sprite offset table
+ +10  u16,u16  flags (usually 0)
+ +14  …        sprite data (LZSP-compressed), sprite 0 first
+ …
+ [table_off]   u32[sprite_count]  ; file offset of each sprite; sprite i spans
+                                  ; [tbl[i], tbl[i+1]) (last runs to table_off)
 ```
 
-- **Sprites** are stored **LZ-compressed** (`LZSP`); needs a decompressor.
-- **Scripts** drive a small **bytecode VM** (`Unknown opcode error. opcode: …`).
-  Reversing the opcode set unlocks all in-game animation. Top Phase 2 target.
+Validated on all 55 files: the trailing table holds **exactly** `sprite_count`
+u32 entries (file tail = `sprite_count × 4`), monotonic, first entry = 14.
+Examples: `ALBERT` 11 sprites, `BTNS` 77, `DINOMART` 91, `AUCTION` 109,
+`PARK` 138.
 
-## `.PIC` — full-screen images
+- **Sprites** are **LZ-compressed** (`ReadActLZSP, sprite = %d`). The LZSP codec
+  + per-sprite bitmap header (likely `width,height` then RLE/LZ pixels) is the
+  next layer to reverse — see Phase 3.
+- Some actors also carry **scripts** (`script count`/`script size`) driving the
+  actor **bytecode VM** (`Unknown opcode error. opcode: …`); located via the
+  `+10` flags region. Opcode set TBD.
 
-25 files (title, auction, bank, diner, blueprints, `font.pic`, `pens.pic`…).
-Loaded by `ReadPic`, same 4-char magic discipline
-(`ReadPic:Unrecognized header '%4.4s'`). Likely planar/packed VGA (320×200 or
-640×480). Decoder TBD.
+## `UNCP` — pictures (two sub-variants)
+
+```
+ +0   char[4]  "UNCP"
+ +4   u16      count / type
+ +6   u16      pad (0)
+ +8   u32[…]   offset table
+```
+
+- **atlas** subtype — `+8` holds a monotonic, in-bounds `u32` offset table of
+  sub-images (e.g. `PENS` 272 poses, `OFFICE` 48, `ABOUT` 88, `CREDITS` 36).
+- **fullscreen** subtype — a single near-EOF pointer at `+8` then a full-screen
+  compressed image; `+4` is constant `8` (all background screens: `AUCTION`,
+  `MALL`, `MECC`, `BLUEPRNT`, `WINSHOP`, …).
+
+The `+4` field doubles as count (atlas) vs type flag (fullscreen); disambiguating
+it and decoding the pixel data is Phase 3. `FONT.PIC` carries `width=128,
+height=64` at `+14` — a fixed-grid glyph sheet, its own special case.
 
 ## `.ABT` — sprites / sound bits
 

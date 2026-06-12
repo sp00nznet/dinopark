@@ -118,20 +118,21 @@ in parallel — see [`docs/FORMATS.md`](docs/FORMATS.md) (WIP).
 
 ## Status
 
-🚧 **Phase 1 done — decoded and mapped.**
+🚧 **Phase 2 done — named & asset formats cracked.**
 
 - ✅ Rights situation researched (see below) — abandonware; **no game files shipped here**.
 - ✅ Binary triaged: unpacked Borland-C 16-bit DOS exe, **large model**, Miles audio.
 - ✅ Project scaffolded on the [pcrecomp toolkit](https://github.com/sp00nznet/pcrecomp).
-- ✅ **Decoded & mapped: 693 functions, 75,175 instructions, 883 strings.** Large-model
-  call graph completed — **3,609/3,611 far calls resolved (99.9%)**. Code/data boundary
-  pinned at `0x34031`. See [`docs/FUNCTIONS.md`](docs/FUNCTIONS.md).
-- ✅ **Architecture discovered:** an **actor script VM** (`.ACT` bytecode), **LZ-packed
-  sprites**, and Miles XMI music. See [`docs/FORMATS.md`](docs/FORMATS.md).
-- ✅ **Upstreamed** the large-model call-graph + code/data-boundary logic to
+- ✅ **Phase 1 — decoded & mapped:** 693 functions, 75,175 instructions, 883 strings.
+  Large-model call graph completed — **3,609/3,611 far calls resolved (99.9%)**.
+  See [`docs/FUNCTIONS.md`](docs/FUNCTIONS.md). Upstreamed to
   [`pcrecomp/disasm/largemodel16.py`](https://github.com/sp00nznet/pcrecomp).
-- ⏭️ **Next (Phase 2):** classify the Borland runtime layer, string→function naming,
-  reverse the `.ACT` script VM, begin lifting game logic.
+- ✅ **Phase 2 — naming + assets:** string-xref naming pinned the dinosaur-species
+  table, employee-hiring and finance screens; **cracked the `UNC` asset container
+  family — `UNC2` actor format 100% solved (55/55 files)**, `UNCP` pictures mapped.
+  See [`docs/PHASE2.md`](docs/PHASE2.md) and [`docs/FORMATS.md`](docs/FORMATS.md).
+- ⏭️ **Next (Phase 3):** decode the LZSP sprite codec (render a real dino to PNG),
+  reverse the actor script VM, Ghidra/IDA far-pointer cross-seed, begin lifting.
 
 ---
 
