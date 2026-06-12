@@ -40,11 +40,29 @@ function that actually draws the dinosaurs.
 
 ## What this means for rendering
 
-A faithful PNG render needs all three modeled: the per-row control opcodes, the
-DPCM delta reconstruction (+ the `0x0e20` delta table), the row-iteration that
-calls the scanline decoder, and the VGA palette. That's a focused port of
-`FUN_1000_0e50`/`191d_08fb` — the **next Phase 3 step**, now that the exact
-functions and algorithm are known.
+The loader (`FUN_1862_0797`) does **in-place decompression**: it reads the
+compressed sprite to the *tail* of a buffer, then `FUN_1000_0e50` expands it
+forward — `*src` (first u16) is the decompressed size, `src[8]` the seed color,
+the stream at `src+9`. The bit-expansion helpers (`0f2e/103b/10de`) take their
+args in **registers** (`CX`=count, `SI`=src, `DI`=dst) against the `0x0e20`
+delta table, so the decompiled C alone doesn't show the wiring — the raw asm is
+needed to port them exactly.
+
+The on-screen plotter `FUN_191d_0ab7` decompiles to a stub and the real worker
+`FUN_191d_0bf7` is flagged by Ghidra with *overlapping instructions*, *bad
+instruction data*, and a *recovered jumptable eliminated as dead code* — i.e.
+it's **hand-optimized, jump-table-dispatched, self-modifying planar-VGA
+assembly**. That's the fastest blit on a 386, and it does not decompile cleanly.
+
+### Recommended path (don't hand-port the hairy asm)
+
+A pixel-perfect render of these is best produced **the static-recomp way: lift
+`FUN_1000_0e50` + helpers (and/or the VGA blitter) and execute the original code
+against a buffer**, rather than reimplementing self-modifying VGA asm by hand.
+That makes the sprite render a *product of the recomp itself* — the right
+verification milestone — and folds into the lifting phase instead of a brittle
+parallel reimplementation. The palette comes from the VGA DAC the game programs
+at startup (to be captured during bring-up).
 
 ## Reproducing the Ghidra analysis
 

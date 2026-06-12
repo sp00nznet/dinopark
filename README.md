@@ -131,13 +131,14 @@ in parallel — see [`docs/FORMATS.md`](docs/FORMATS.md) (WIP).
   table, employee-hiring and finance screens; **cracked the `UNC` asset container
   family — `UNC2` actor format 100% solved (55/55 files)**, `UNCP` pictures mapped.
   See [`docs/PHASE2.md`](docs/PHASE2.md) and [`docs/FORMATS.md`](docs/FORMATS.md).
-- 🔬 **Phase 3 — codec located (Ghidra):** imported + decompiled all 839 functions;
-  **found the real sprite codec** — it's **opcode-driven DPCM** (not plain RLE),
-  decoded by `FUN_1000_0e50`/helpers and blitted via the VGA planar path
-  `FUN_191d_08fb`. Per-sprite header is `width,height` (ALBERT 62×43). See
-  [`docs/CODEC.md`](docs/CODEC.md).
-- ⏭️ **Next:** port the DPCM decoder + VGA palette to render a real dinosaur to PNG,
-  reverse the actor script VM, then begin lifting.
+- 🔬 **Phase 3 — codec fully located (Ghidra):** imported + decompiled all 839
+  functions; **found the real sprite codec** — an **in-place DPCM decompressor**
+  (`FUN_1000_0e50` + register-arg helpers) and a **self-modifying, jump-table
+  planar-VGA blitter** (`FUN_191d_0bf7`) that even Ghidra can't fully decompile.
+  Per-sprite header is `width,height` (ALBERT 62×43). See [`docs/CODEC.md`](docs/CODEC.md).
+- ⏭️ **Next:** the render milestone is best done *the recomp way* — **lift &
+  execute** these decode functions rather than hand-port self-modifying VGA asm —
+  so it folds into the lifting phase. Then the actor script VM.
 
 ---
 
