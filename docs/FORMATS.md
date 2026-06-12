@@ -54,9 +54,16 @@ Examples: `ALBERT` 11 sprites, `BTNS` 77, `DINOMART` 91, `AUCTION` 109,
 
 - **atlas** subtype — `+8` holds a monotonic, in-bounds `u32` offset table of
   sub-images (e.g. `PENS` 272 poses, `OFFICE` 48, `ABOUT` 88, `CREDITS` 36).
-- **fullscreen** subtype — a single near-EOF pointer at `+8` then a full-screen
-  compressed image; `+4` is constant `8` (all background screens: `AUCTION`,
-  `MALL`, `MECC`, `BLUEPRNT`, `WINSHOP`, …).
+- **fullscreen** subtype — full layout (from the loader `FUN_1d88_0f75`):
+  ```
+   +0  "UNCP"   +4 u32 block_off(=8)   +8 u32 block_size
+   +12 u16 W    +14 u16 H
+   +16 u8[768]  PALETTE (256 × 6-bit RGB, idx 0 → black)
+   +784 RLE image stream  (decoded by fn_1907 / FUN_1907_00be)
+  ```
+  Screens: `AUCTION`, `MALL`, `MECC`, `BLUEPRNT`, `WINSHOP`, … The palette is
+  copied to `DAT_4020_9abf` then to the DAC — see [`PALETTE.md`](PALETTE.md).
+  **Rendered in full color from recompiled code** via `scripts/build_pic.ps1`.
 
 The `+4` field doubles as count (atlas) vs type flag (fullscreen); disambiguating
 it and decoding the pixel data is Phase 3. `FONT.PIC` carries `width=128,

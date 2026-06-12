@@ -25,6 +25,10 @@ def main():
     for i, a in enumerate(sys.argv):
         if a == "--pal" and i + 1 < len(sys.argv):
             pal_path = sys.argv[i + 1]
+    # default: the palette decode_pic.c extracted from the .PIC itself
+    auto = os.path.join(WORK, "pic_palette.pal")
+    if not pal_path and os.path.exists(auto):
+        pal_path = auto
 
     if pal_path:
         raw = open(pal_path, "rb").read()[:768]

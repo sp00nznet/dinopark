@@ -144,15 +144,15 @@ in parallel — see [`docs/FORMATS.md`](docs/FORMATS.md) (WIP).
   (Tracing the loader also revealed the `.ACT` dino actors use a separate
   self-modifying VGA blitter; the `.PIC`/`.ABT` art uses the RLE path we lifted.)
   See [`docs/PHASE4.md`](docs/PHASE4.md).
-- 🎨 **Palette traced:** mapped the full DAC pipeline (`FUN_191d_1b1c` writer ←
-  `FUN_1f0b_1140` ← the 6-bit buffer `DAT_4020_9dbf`). Finding: DinoPark **builds
-  its palette procedurally at runtime** (fades, color-cycling, screen-effect
-  patches) — no static palette blob in the EXE, assets, or `.PIC`s, and it's not
-  the stock VGA palette. So full color needs the palette-build path *executed*;
-  render is grayscale-by-index for now (fully legible). See [`docs/PALETTE.md`](docs/PALETTE.md).
-- ⏭️ **Next:** lift the screen-setup/palette-init path to capture `DAT_4020_9dbf`
-  (→ color); lift the self-modifying planar blitter for the `.ACT` dinosaurs;
-  then push toward a playable bring-up.
+- 🎨 **Palette solved — full color!** Read the real `.PIC` loader (`FUN_1d88_0f75`)
+  and found the palette is **embedded in each full-screen `.PIC`**: `[UNCP][off]
+  [size][W][H][768-byte 6-bit palette][RLE image]`. Decode the image from offset
+  **784** and use **`[16:784]`** as the palette → the auction hall renders in its
+  real DinoPark colors (tan barn walls, the green "CURRENT CAPITAL" banner, purple
+  chairs), entirely from the lifted `fn_1907` + the `.PIC`'s own palette. See
+  [`docs/PALETTE.md`](docs/PALETTE.md).
+- ⏭️ **Next:** lift the self-modifying planar blitter for the `.ACT` dinosaur
+  actors; then push toward a playable bring-up.
 
 ---
 

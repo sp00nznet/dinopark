@@ -1,8 +1,34 @@
-# Palette trace (Phase 4)
+# Palette trace (Phase 4) — SOLVED ✅
 
-Goal: color the recompiled `.PIC` render. Result: the palette pipeline is fully
-traced, and the finding is that DinoPark's palette is **built at runtime in
-code** — there is no static palette to lift out.
+Goal: color the recompiled `.PIC` render. **Done** — the auction screen now
+renders in its real DinoPark colors via the recompiled blitter + the palette
+embedded in the `.PIC` itself.
+
+## The answer: the palette is in the `.PIC`, at offset 16
+
+Reading the real `.PIC` loader `FUN_1d88_0f75` (called as
+`FUN_1d88_0f75("auction.pic", …, param_6=1)` — `param_6` = "load palette") gave
+the true full-screen layout. The "RLE stream" I first decoded from offset 16 was
+actually **palette + image**:
+
+```
+ +0   char[4] "UNCP"
+ +4   u32     block offset (= 8)
+ +8   u32     block size
+ +12  u16     width  (320)
+ +14  u16     height (200)
+ +16  u8[768] PALETTE   ← 256 × 6-bit RGB  (index 0 forced to black on load)
+ +784 …       RLE image stream  (decoded by the lifted fn_1907)
+```
+
+The loader copies that 768-byte block into the master palette `DAT_4020_9abf`
+(`FUN_1d88_13ad`), which is then faded into the live `DAT_4020_9dbf` and pushed to
+the DAC. So once we decode the image from **784** (not 16) and use the bytes at
+**[16:784]** as the palette, the colors are exact — verified: index `0x81`=(43,35,32)
+tan, `0x83`=(30,23,20) brown — the auction hall's barn-wood walls.
+
+`decode_pic.c` now emits both the image (`pic_decoded.bin`) and the palette
+(`pic_palette.pal`); `render_pic.py` applies the palette automatically.
 
 ## The DAC pipeline (traced end to end)
 
@@ -20,34 +46,31 @@ DAT_4020_9dbf  (DS:0x9dbf)           the active 256-color, 6-bit palette buffer
     - the video-driver entry is indirect: (*DAT_4020_a2aa)(0x1000, &DAT_4020_9dbf)
 ```
 
-## Where the palette comes from — and doesn't
+## How the palette flows at runtime
 
-Confirmed by exhaustive search:
+```
+.PIC[16:784]  ──FUN_1d88_13ad memcpy──▶  DAT_4020_9abf   (master palette)
+                                              │  fade-in: pal[i]=(src[i]*level)>>4
+                                              ▼
+                                          DAT_4020_9dbf   (live palette)
+                                              │  color-cycle, screen-effect patches
+                                              ▼
+                                          DAC (out 0x3C8/0x3C9)
+```
 
-- ❌ **Not in the `.PIC` files.** AUCTION.PIC is `[UNCP][type=8][pad][u32 tail]
-  [W=320][H=200][RLE]`; the whole stream `[16:tail]` decodes to the 320×200
-  image (the trailing bytes are decode overshoot, not a palette). No 768-byte
-  6-bit block exists anywhere in the file.
-- ❌ **Not a static blob in `DINOPARK.EXE`.** The only all-≤63 768-byte region is
-  a **grayscale gamma ramp** (`0x34B3F`, R=G=B) used for fades — not a color palette.
-- ❌ **Not in any asset file** (`.ACT`, `.ABT`, `DINOSG.00x`, `PRODUCT.PF`, …).
-- ❌ **Not the standard mode-13h VGA palette** — applying it gives the right
-  *structure* but wrong (psychedelic) hues, so the game reprograms the DAC.
+The palette is **shipped per-screen in the `.PIC`** and then animated in place:
+- `FUN_1f0b_05a9/05f4` copy/fade `DAT_4020_9abf → DAT_4020_9dbf` (fade in/out).
+- `FUN_1d88_165b` / `FUN_27e5_0812` **color-cycle** entries (the auction's shimmer).
+- `FUN_3619_06e6` patches entries for **screen-effect flashes**.
 
-What the code actually does to `DAT_4020_9dbf`:
-- `FUN_1f0b_0518` **fades** it (`pal[i] = (pal[i] * level) >> 4`, level 16→0).
-- `FUN_1d88_165b` / `FUN_27e5_0812` **color-cycle** it (rotate entries by 3 bytes).
-- `FUN_3619_06e6` saves/restores it and patches entries for **screen effects**
-  (e.g. `FUN_1000_5000(..., 0x3f, 9)` = flash 9 entries to white).
+(The grayscale gamma ramp at EXE `0x34B3F`, R=G=B, is just the fade table — not a
+color palette, which is what threw the first pass off.)
 
-I.e. the palette is **assembled and animated procedurally** at runtime; it is
-never read as one block from disk.
+## Result
 
-## Consequence
-
-Coloring the render exactly requires **executing the palette-build path** — the
-same static-recomp approach that produced the image itself: lift the screen-setup
-/ palette-init code and run it to capture `DAT_4020_9dbf`. That's the next step.
+`scripts/build_pic.ps1 original\AUCTION.PIC` now renders the auction hall in its
+true colors — image decoded by the **lifted `fn_1907`**, colored by the palette
+**lifted straight out of the `.PIC`**. No emulator, no guesswork.
 
 Until then `tools/render_pic.py` renders **grayscale by index** (fully legible —
 see the auction hall). A `--pal file.pal` hook is ready for when we capture the
