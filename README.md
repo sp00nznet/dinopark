@@ -151,8 +151,15 @@ in parallel — see [`docs/FORMATS.md`](docs/FORMATS.md) (WIP).
   real DinoPark colors (tan barn walls, the green "CURRENT CAPITAL" banner, purple
   chairs), entirely from the lifted `fn_1907` + the `.PIC`'s own palette. See
   [`docs/PALETTE.md`](docs/PALETTE.md).
-- ⏭️ **Next:** lift the self-modifying planar blitter for the `.ACT` dinosaur
-  actors; then push toward a playable bring-up.
+- 🦖 **`.ACT` dino sprites — container cracked, blitter mapped:** corrected the
+  Phase 3 claim — the actor blitter (`FUN_191d_08fb`/`0bf7`) is **not**
+  self-modifying; it's CS-relative scratch + planar VGA + a "compiled-blit"
+  computed jump, so it **is** liftable. The sprite format is solved:
+  `[u16 w][u16 h][…][u16 control_size][u16 pixel_size][control][raw pixels]`
+  (ALBERT 62×43, 112+585 ✓). But the control stream is **planar** — a pixel-exact
+  dino needs the blitter *executed* (linear decodes smear). See [`docs/SPRITES.md`](docs/SPRITES.md).
+- ⏭️ **Next:** lift `FUN_191d_08fb`/`0bf7` (override the `jmp bx` compiled-blit)
+  + model VGA planar memory → render a dinosaur; then a playable bring-up.
 
 ---
 
