@@ -50,10 +50,30 @@ bounded:
 - a **watchdog thread** (`DINO_WATCHDOG`, default 8s) that force-exits any
   non-dispatch busy-wait.
 
-Next debugging pass: confirm `DS=DGROUP (0x3020)` holds across the init calls,
-verify the BSS clear / initialized-data layout, and trace which structure yields
-the first code-pointer — that's what turns "runs 264 init dispatches" into "loads
-the title". Debug env: `DINO_TRACE=1` (dispatch), `DINO_DBG=1` (INT 21h).
+### Diagnosis (DS/BSS trace) — root cause is jump-table dispatch
+
+Traced it. Two suspects **ruled out**, one **confirmed**:
+
+- ✅ **DS is correct.** Every dispatch runs with `ds=3020` (DGROUP) — not a
+  segment bug.
+- ✅ **Initialized data loads correctly.** The DGROUP hook pointers read right
+  from the image (`DAT_4020_7624 = 0000:15AC`, init count = 0), and the
+  convergence registers only **valid instruction-boundary** init targets (32 of
+  88 raw misses; the other 56 were garbage addresses that, when forced, corrupted
+  the lift — now filtered by decoding the containing function).
+- ❌ **Root cause: jump-table / switch dispatch.** The garbage dispatch targets
+  are **code bytes read as pointers** — e.g. `EC8B:5500` = `mov sp,bp; push bp`,
+  `8B55` = `push bp; mov bp,sp`. Indirect **jumps** (`jmp word [table+bx]`, i.e.
+  C `switch`) land on mid-function case-blocks (`0x1C0F` = `+0x23` into
+  `fn_01BEC`). Dispatching a case-block as a standalone function runs it with the
+  wrong register/stack state, so it computes addresses into the code segment and
+  reads instructions as data → cascading garbage.
+
+So the next frontier is **proper jump-table handling**: recover each `jmp
+word [cs:table]` / `jmp word [bx*2+disp]`, read its entries from the image, and
+either lift the cases inline within the enclosing function or dispatch them with
+the enclosing frame intact (the hard part of any 16-bit recomp). Debug env:
+`DINO_TRACE=1` (per-dispatch ds/cs/target), `DINO_DBG=1` (INT 21h).
 
 ## The runtime so far (`runtime16.c`)
 

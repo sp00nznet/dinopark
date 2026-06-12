@@ -54,14 +54,31 @@ def main():
     # function starts (mid-function jump-table / init-routine targets). These
     # overlap existing functions; the lifter handles that fine.
     miss_path = os.path.join(ROOT, "work", "dino_misses.txt")
+    detlist = sorted(starts)
+    import bisect as _bi
+
+    def valid_boundary(t):
+        """t is a real instruction start inside its containing detected function
+        (filters garbage in-range pointers that aren't entry points)."""
+        i = _bi.bisect_right(detlist, t) - 1
+        if i < 0:
+            return False
+        fs = detlist[i]
+        fe = det_end[fs]
+        if not (fs < t < fe):
+            return False
+        try:
+            offs = {ins.offset for ins in Decoder(data[fs + HDR:fe + HDR], base_offset=fs).decode_all()}
+        except Exception:
+            return False
+        return t in offs
+
     forced_targets = set()
     if os.path.exists(miss_path):
         for line in open(miss_path):
             line = line.strip()
-            if line:
-                t = int(line, 16)
-                if t not in starts and 0 < t < max(det_end.values()):
-                    forced_targets.add(t)
+            if line and int(line, 16) not in starts and valid_boundary(int(line, 16)):
+                forced_targets.add(int(line, 16))
 
     funcs = [("fn_00000", 0, first_det)]                # whole startup (jmp labels)
     ct = sorted(call_tgts)
@@ -148,10 +165,14 @@ static void note_miss(unsigned addr) {
     if (g_nmiss < MAXMISS) g_miss[g_nmiss++] = addr;
 }
 void recomp_dump_misses(const char *path) {
+    /* merge with the existing file so the forced-function set grows monotonically
+     * across convergence rounds (a shallow run must not shrink it). */
+    FILE *r = fopen(path, "r");
+    if (r) { unsigned a; while (fscanf(r, "%x", &a) == 1) note_miss(a); fclose(r); }
     FILE *f = fopen(path, "w"); if (!f) return;
     for (int i = 0; i < g_nmiss; i++) fprintf(f, "%05X\\n", g_miss[i]);
     fclose(f);
-    fprintf(stderr, "[disp] %d distinct in-range misses -> %s\\n", g_nmiss, path);
+    fprintf(stderr, "[disp] %d cumulative in-range misses -> %s\\n", g_nmiss, path);
 }
 
 /* total dispatch budget: deep init currently runs into garbage function
@@ -166,13 +187,16 @@ void recomp_dispatch(CPU *cpu, unsigned seg, unsigned off) {
     if (addr == 0) return;                              /* uninitialized fnptr */
     if (--g_disp_budget <= 0) { cpu->halted = 1; return; }
     if (g_disp_depth > 240) { if (g_disp_trace) fprintf(stderr, "[disp] depth cap\\n"); return; }
+    static long seq = 0; long n = seq++;
+    int garbage = (addr > CODE_TOP + 0x2000);   /* target beyond all code = bad ptr */
     for (int i = 0; i < N_DISP; i++)
         if (g_disp[i].addr == addr) {
-            if (g_disp_trace) fprintf(stderr, "[disp] -> fn_%05X\\n", addr);
+            if (g_disp_trace && n < 80) fprintf(stderr, "[%03ld] ds=%04X cs=%04X -> fn_%05X\\n", n, cpu->ds, cpu->cs, addr);
             g_disp_depth++; g_disp[i].fn(cpu); g_disp_depth--; return;
         }
     note_miss(addr);
-    if (g_disp_trace) fprintf(stderr, "[disp] MISS %04X:%04X (lin 0x%05X)\\n", seg, off, addr);
+    if (g_disp_trace && (n < 80 || garbage))
+        fprintf(stderr, "[%03ld] ds=%04X cs=%04X MISS %04X:%04X%s\\n", n, cpu->ds, cpu->cs, seg, off, garbage ? " <GARBAGE>" : "");
 }
 """)
         # empty stubs for unlifted callees
