@@ -55,10 +55,32 @@ construction so `fn_0E50` receives a loader-correct input. Then one decode pass
 yields the full sprite, the VGA DAC palette (programmed at startup) colors it,
 and we render the dinosaur to PNG — produced *by the recompiled code itself*.
 
-## Why this is the right path
+## Following the loader changed the picture (important)
 
-We are no longer reverse-engineering the codec by hand (Phase 3 showed the
-on-screen blitter is self-modifying VGA asm that doesn't decompile). Instead the
-**recomp executes the original logic**. The pipeline now stands; finishing the
-render is a matter of framing its input, which is ordinary lifting work — not a
-brittle reimplementation.
+Lifting toward the loader, the decompiled call tree revealed **two distinct asset
+paths** — and they decode differently:
+
+| Asset | Loader | Decode / draw |
+|-------|--------|---------------|
+| **`.ACT`** actors (the dinosaurs) | `FUN_1d88_0005` → `FUN_1d88_04a3` | Loaded **compressed** into a sprite table (16-byte per-sprite header → two chunks `a168`+`a16a`); drawn on demand by the **self-modifying planar-VGA blitter** `FUN_191d_0bf7`. `fn_0E50` is **not** called. |
+| **`.PIC`** screens + **`.ABT`** sprites | `FUN_1862_0797` (open → read → in-place) | Decoded by **`fn_0E50`** (the DPCM decoder we lifted): buffer = decompressed size, compressed stream copied to the buffer *tail*, decode forward in place. |
+
+Caller evidence: `FUN_1862_0797` is invoked for `auction.pic`, `bapa.pic`,
+`credits.pic`, and many `.abt` files; the `.act` actors go exclusively through
+`FUN_1d88` + the planar blitter.
+
+### Consequence for "render a dinosaur"
+
+The DPCM decoder we successfully lifted renders **`.PIC` full-screen art and
+`.ABT` sprites**, not the `.ACT` dinosaur actors. Two honest options:
+
+1. **Render a `.PIC`/`.ABT` now** — the lifted `fn_0E50` already runs; it needs
+   the in-place file framing replicated (decompressed size + compressed length
+   from the file header) to feed it correctly. This yields a real DinoPark
+   *screen* image from recompiled code — the nearest tractable visual.
+2. **Render an actual `.ACT` dinosaur** — requires lifting the **self-modifying,
+   jump-table planar-VGA blitter** `FUN_191d_0bf7` (which Ghidra cannot
+   decompile) and modelling VGA plane writes. Much harder; a dedicated effort.
+
+Either way the lift pipeline stands and executes; the remaining work is framing
+(`.PIC`) or a hard blitter lift (`.ACT`).
