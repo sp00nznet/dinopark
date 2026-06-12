@@ -72,6 +72,7 @@ void port_out8(CPU *cpu, uint16_t port, uint8_t val) {
 /* ---- software interrupts ---------------------------------------------- */
 static void int21(CPU *cpu) {
     uint8_t ah = cpu->ah;
+    if (getenv("DINO_DBG")) fprintf(stderr, "[INT21] AH=%02X BX=%04X CX=%04X\n", ah, cpu->bx, cpu->cx);
     switch (ah) {
         case 0x25: case 0x35: break;                 /* get/set int vector - ignore */
         case 0x30: cpu->ax = 0x0005; break;          /* DOS version 5.0 */
@@ -161,11 +162,26 @@ int dino_load_image(CPU *cpu, const char *path) {
     }
     free(file);
 
-    /* MZ initial register state (image space) */
-    cpu->cs = LOADSEG;  cpu->ip = file ? 0 : 0;          /* CS:IP = 0000:0000 */
+    /* Build a minimal PSP + environment above the image (image lives at
+     * linear 0). DOS hands a real program DS=ES=PSP and the env segment in
+     * PSP:[0x2C]; the Borland c0 startup scans the env and aborts without it. */
+    const uint16_t PSP_SEG = 0x9000, ENV_SEG = 0x9100, TOP_SEG = 0xA000;
+    uint32_t psp = seg_off(PSP_SEG, 0), env = seg_off(ENV_SEG, 0);
+    cpu->mem[psp + 0x00] = 0xCD; cpu->mem[psp + 0x01] = 0x20;          /* INT 20h */
+    cpu->mem[psp + 0x02] = TOP_SEG & 0xFF; cpu->mem[psp + 0x03] = TOP_SEG >> 8; /* top of mem */
+    cpu->mem[psp + 0x2C] = ENV_SEG & 0xFF; cpu->mem[psp + 0x2D] = ENV_SEG >> 8; /* env seg */
+    cpu->mem[psp + 0x80] = 0;                                          /* cmdline len 0 */
+    cpu->mem[psp + 0x81] = 0x0D;
+    /* environment: empty (double null) + count(1) + program path */
+    cpu->mem[env + 0] = 0; cpu->mem[env + 1] = 0;
+    cpu->mem[env + 2] = 1; cpu->mem[env + 3] = 0;
+    memcpy(&cpu->mem[env + 4], "C:\\DINOPARK\\DINOPARK.EXE", 24);
+
+    /* MZ initial register state (image space); DOS enters with DS=ES=PSP */
+    cpu->cs = LOADSEG;  cpu->ip = 0;                      /* CS:IP = 0000:0000 */
     cpu->ss = 0x3D04;   cpu->sp = 0x0080;                /* from header */
-    cpu->ds = 0x4000;   cpu->es = 0x4000;                /* DGROUP-ish */
-    printf("loaded %ld image bytes, %u relocs; entry %04X:%04X SS:SP %04X:%04X\n",
-           img_sz, nrelocs, cpu->cs, cpu->ip, cpu->ss, cpu->sp);
+    cpu->ds = PSP_SEG;  cpu->es = PSP_SEG;
+    printf("loaded %ld image bytes, %u relocs; entry %04X:%04X SS:SP %04X:%04X DS=%04X(PSP)\n",
+           img_sz, nrelocs, cpu->cs, cpu->ip, cpu->ss, cpu->sp, cpu->ds);
     return 0;
 }

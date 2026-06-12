@@ -17,11 +17,28 @@ work\dino_boot.exe          # loads the image, runs the recompiled startup
   so indirect calls/jumps resolve at runtime (`call/jmp` through registers/tables).
 - **It compiles and links** into `work/dino_boot.exe` (MSVC, 64-bit host — the
   flat `seg:off → mem[]` model is pointer-size-agnostic).
-- **It boots.** `boot.c` + `runtime16.c` load the 250 KB image, **apply all 4,139
-  relocations**, seed `CS:IP=0000:0000 / SS:SP=3D04:0080 / DS=0x3020 (DGROUP)`,
-  and run `fn_00000`. The recompiled Borland startup executes: INT 21h DOS-version
-  check, PSP read, C-runtime init helpers (`fn_0017D/01ED/00231`), then the call
-  into the game (`fn_01604`).
+- **It boots and runs the real startup → `main`.** `boot.c` + `runtime16.c` load
+  the 250 KB image, **apply all 4,139 relocations**, build a **minimal PSP +
+  environment** above the image, and enter at `0000:0000` with `DS=ES=PSP`. The
+  recompiled Borland `c0` startup then executes for real:
+  ```
+  INT 21h AH=30 (DOS version) → AH=35×4/25 (install int vectors)
+          → AH=4A (resize memory block) → call main (fn_01604 → FUN_1000_15ad)
+  ```
+  `main` runs its init sequence, and the game's **indirect calls now dispatch**
+  (`lifter.dispatch=True` → `recomp_dispatch` reads the function pointer from
+  memory and calls the target by address). It boots cleanly — no crash.
+
+## The two blockers between here and the game loop
+
+1. **Function-pointer table init.** `main` walks init/atexit-style tables and
+   calls through them; right now most entries read uninitialized memory
+   (`[disp] MISS 5E1F:0701`…), so the init routines don't run. The startup's
+   table-copy / BSS setup needs to land correctly first.
+2. **Mid-function dispatch (jump tables).** Some indirect targets are *inside*
+   functions (computed `jmp`/switch tables, e.g. `0x1C0F`), which a
+   function-start dispatch can't enter. These targets must be registered as their
+   own functions (the bolo approach).
 
 ## The runtime so far (`runtime16.c`)
 

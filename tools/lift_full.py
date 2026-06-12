@@ -34,36 +34,37 @@ def main():
     first_det = min(starts)
     det_end = {f["start"] - HDR: f["end"] - HDR for f in fmap}
 
-    # The Borland c0 startup (image 0 .. first detected func) has no standard
-    # prologue, so the analyzer missed it. Discover its real functions by
-    # following near CALL targets from the entry (calls only, forward, within the
-    # startup region) so the C-runtime init helpers actually run.
+    # The Borland c0 startup (image 0 .. first detected func) is one tangled
+    # function with internal jmps; the analyzer missed it (no prologue). Lift the
+    # WHOLE region as fn_00000 so internal jmps stay as labels, and ALSO expose
+    # its near-CALL targets as their own (overlapping) functions so subroutine
+    # calls resolve. Call targets are found by one linear decode of the region.
     from decode16 import OpType
-    forced, work = {0}, [0]
-    while work:
-        s = work.pop()
-        try:
-            insns = Decoder(data[s + HDR:first_det + HDR], base_offset=s).decode_all()
-        except Exception:
-            continue
-        for ins in insns:
+    call_tgts = set()
+    try:
+        for ins in Decoder(data[HDR:first_det + HDR], base_offset=0).decode_all():
             if ins.mnemonic == "call" and ins.op1 and ins.op1.type == OpType.REL16:
                 t = ins.op1.disp & 0xFFFF
-                if 0 <= t < first_det and t not in forced:
-                    forced.add(t); work.append(t)
-            if ins.mnemonic in ("ret", "retf", "iret"):
-                break                                  # stop at first return (func end)
+                if 0 < t < first_det:
+                    call_tgts.add(t)
+    except Exception:
+        pass
 
-    startup = sorted(forced)
-    funcs = []
-    for i, s in enumerate(startup):
-        end = startup[i + 1] if i + 1 < len(startup) else first_det
+    funcs = [("fn_00000", 0, first_det)]                # whole startup (jmp labels)
+    ct = sorted(call_tgts)
+    for i, s in enumerate(ct):                          # call-target subroutines
+        end = ct[i + 1] if i + 1 < len(ct) else first_det
         funcs.append((f"fn_{s:05X}", s, end))
     for s in sorted(starts):
         funcs.append((f"fn_{s:05X}", s, det_end[s]))
-    funcs.sort(key=lambda t: t[1])
+    # de-dup by start (detected funcs win their real end)
+    seen = {}
+    for name, s, e in funcs:
+        if s not in seen or s in det_end:
+            seen[s] = (name, s, det_end.get(s, e))
+    funcs = sorted(seen.values(), key=lambda t: t[1])
     known = {io: name for name, io, _ in funcs}
-    print(f"  startup functions: {len(forced)}")
+    print(f"  startup: fn_00000=[0,0x{first_det:X}) + {len(ct)} call-target subroutines")
 
     os.makedirs(OUT, exist_ok=True)
     bodies, all_calls, lifted = [], set(), 0
@@ -72,6 +73,7 @@ def main():
         try:
             insns = Decoder(data[fstart:fend], base_offset=io).decode_all()
             lifter = Lifter(hdr_size=HDR, known_funcs=known)
+            lifter.dispatch = True       # emit real recomp_dispatch for indirect call/jmp
             bodies.append(lifter.lift_function(name, insns, io, is_far=True))
             all_calls |= lifter.func_calls
             lifted += 1
@@ -112,12 +114,21 @@ def main():
         f.write("};\n\n")
         f.write(f"#define N_DISP {len(names)}\n")
         f.write("""
+static int g_disp_trace = -1;
+static int g_disp_depth = 0;
 /* indirect call/jmp by (seg,off): linear = seg*16+off (image space) */
 void recomp_dispatch(CPU *cpu, unsigned seg, unsigned off) {
     unsigned addr = ((seg << 4) + off) & 0xFFFFF;
+    if (g_disp_trace < 0) g_disp_trace = getenv("DINO_TRACE") ? 1 : 0;
+    /* addr 0 = an uninitialized function pointer; never re-enter the startup. */
+    if (addr == 0) return;
+    if (g_disp_depth > 240) { if (g_disp_trace) fprintf(stderr, "[disp] depth cap\\n"); return; }
     for (int i = 0; i < N_DISP; i++)
-        if (g_disp[i].addr == addr) { g_disp[i].fn(cpu); return; }
-    fprintf(stderr, "[dispatch] no function at %04X:%04X (lin 0x%05X)\\n", seg, off, addr);
+        if (g_disp[i].addr == addr) {
+            if (g_disp_trace) fprintf(stderr, "[disp] -> fn_%05X\\n", addr);
+            g_disp_depth++; g_disp[i].fn(cpu); g_disp_depth--; return;
+        }
+    if (g_disp_trace) fprintf(stderr, "[disp] MISS %04X:%04X (lin 0x%05X)\\n", seg, off, addr);
 }
 """)
         # empty stubs for unlifted callees
