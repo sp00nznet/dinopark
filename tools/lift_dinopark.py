@@ -34,6 +34,12 @@ FUNCS = [
     ("fn_103B", 0x583B, 0x58DE),   # DPCM helper (4/byte)
     ("fn_10DE", 0x58DE, 0x5946),   # DPCM helper (2/byte)
     ("fn_1907", 0xD92E, 0xDA0E),   # RLE / raw-copy blitter (.PIC full-screen art)
+    # The planar actor blitter FUN_191d_08fb lifts cleanly too — add
+    #   ("fn_E2CB", 0xE2CB, 0xE48E),
+    # to regenerate it into work/. Reading its lifted C gave the exact .ACT
+    # control-stream semantics that tools/decode_act.py implements (the inner
+    # plotter's computed `jmp bx` + VGA planar writes aren't needed for the
+    # logical image — the de-interleave just reconstructs x-order).
 ]
 
 
@@ -55,6 +61,11 @@ def main():
         all_calls |= lifter.func_calls
 
     names = [n for n, _, _ in FUNCS]
+    # Calls to functions we didn't lift (e.g. the planar inner plotter
+    # res_009DC7 = FUN_191d_0bf7, whose computed `jmp bx` doesn't auto-lift) get
+    # an empty stub so the unit still links. They aren't on the harness paths.
+    stubs = sorted(c for c in all_calls if c not in names)
+
     with open(os.path.join(OUT, "dino_decode.h"), "w") as f:
         f.write("#ifndef DINO_DECODE_H\n#define DINO_DECODE_H\n")
         f.write('#include "../cpu.h"\n\n')
@@ -78,7 +89,10 @@ def main():
         # real RET by a few bytes, so the lifter emits a fallthrough we never hit.
         f.write("void recomp_dispatch(CPU *cpu, unsigned seg, unsigned off) {\n")
         f.write('    (void)cpu; (void)seg; (void)off;\n')
-        f.write('    /* should be unreachable for these leaf decoders */\n}\n\n')
+        f.write('    /* should be unreachable for these leaf decoders */\n}\n')
+        for s in stubs:
+            f.write(f"void {s}(CPU *cpu) {{ (void)cpu; }}  /* unlifted callee stub */\n")
+        f.write("\n")
         f.write("\n\n".join(bodies))
         f.write("\n")
 

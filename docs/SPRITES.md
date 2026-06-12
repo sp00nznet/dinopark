@@ -1,8 +1,9 @@
-# `.ACT` actor sprites & the planar blitter (Phase 4)
+# `.ACT` actor sprites & the planar blitter (Phase 4) — SOLVED ✅
 
-Goal: render an actual dinosaur (`.ACT` actor). Progress: the sprite **container
-is cracked** and the blitter **architecture is mapped** — and the Phase 3
-"self-modifying, can't lift" conclusion was **wrong**.
+Goal: render an actual dinosaur (`.ACT` actor). **Done.** `tools/decode_act.py`
+decodes **ALBERT.ACT → Albert the Albertosaurus** (62×43, 585/585 pixels exactly),
+implementing the control semantics taken straight from the **lifted** planar
+blitter. The Phase 3 "self-modifying, can't lift" conclusion was wrong.
 
 ## Correction: the blitter is NOT self-modifying
 
@@ -43,17 +44,36 @@ raw color indices** (0x8c = body color, 111 px; 0x27 = 90 px; … the dino
 silhouette). These load as two chunks via `FUN_1d88_04a3` and become the blitter's
 `bp` (control, struct+9) and `si` (pixels, struct+0xD).
 
-## What remains for the render
+## The control encoding — recovered from the lifted blitter
 
-The control stream is **planar** — processed plane-by-plane by the inner plotter,
-not a flat per-row RLE (every linear interpretation overruns the 62-px width). So
-a pixel-exact dino needs the blitter **executed**, not the format guessed:
+Lifting `FUN_191d_08fb` (`tools/lift_dinopark.py` → readable C) made its control
+walk explicit. Each control byte:
 
-1. Lift `FUN_191d_08fb` + `FUN_191d_0bf7`, overriding the `jmp bx` compiled-blit
-   with an equivalent copy loop.
-2. Model the VGA planar target in recomp16 (Map-Mask plane select + `0xA000`
-   writes), then de-plane to a linear buffer.
-3. Feed the sprite struct (the two chunks) + a palette (from the screen `.PIC`).
+```
+ bit 7 (0x80): start a new scanline   (x = 0, y += 1)
+ bit 6 (0x40): DRAW (byte & 0x3f) pixels from the pixel stream
+               (clear => SKIP that many transparent pixels)
+ 0x00        : end of sprite
+```
 
-That's the genuinely hard remaining piece — a focused multi-step lift, now that
-the container and architecture are fully understood.
+So `9e 48 9d 49 9c 4c …` = *(new row, skip 30, draw 8), (new row, skip 29,
+draw 9), (new row, skip 28, draw 12)…* — the dino's head/body centering and
+widening. Verified: ALBERT sprite-0 consumes **exactly 585/585** pixels over 43
+rows.
+
+The inner plotter `FUN_191d_0bf7` writes those pixels across the 4 VGA planes via
+a computed-jump de-interleave (`bx = 0x0D9C − 4·count; jmp bx` into an unrolled
+`movsb; add si,3` block). That plane spread is pure storage: de-interleaving
+reconstructs **natural x-order**, so the logical image is just the pixel stream
+laid left-to-right. `tools/decode_act.py` therefore reproduces the blitter's
+output without modelling VGA hardware.
+
+## Render
+
+```
+python tools/decode_act.py ALBERT.ACT 0 --pal work/THEORIES.pal
+```
+
+→ Albert the Albertosaurus, full sprite, in colour. The palette is per-screen
+(from the `.PIC` the dino is shown on); colours shift with the screen, the shape
+is exact. Output PNG is gitignored (decoded copyrighted art).
