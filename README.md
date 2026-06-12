@@ -136,9 +136,14 @@ in parallel — see [`docs/FORMATS.md`](docs/FORMATS.md) (WIP).
   (`FUN_1000_0e50` + register-arg helpers) and a **self-modifying, jump-table
   planar-VGA blitter** (`FUN_191d_0bf7`) that even Ghidra can't fully decompile.
   Per-sprite header is `width,height` (ALBERT 62×43). See [`docs/CODEC.md`](docs/CODEC.md).
-- ⏭️ **Next:** the render milestone is best done *the recomp way* — **lift &
-  execute** these decode functions rather than hand-port self-modifying VGA asm —
-  so it folds into the lifting phase. Then the actor script VM.
+- ⚙️ **Phase 4 — the lift is live:** stood up the **recomp16** pipeline and
+  **lifted the DPCM decoder group to C** (`tools/lift_dinopark.py` →
+  `fn_0E50`+3 helpers). It **compiles and *executes natively*** on a real
+  `ALBERT.ACT` sprite — the first DinoPark machine code running as recompiled C,
+  no emulator. Correct full-sprite framing needs the loader (`FUN_1862_0797`)
+  lifted too — the remaining step before the dino renders. See [`docs/PHASE4.md`](docs/PHASE4.md).
+- ⏭️ **Next:** lift the sprite loader so the decoder gets loader-correct input →
+  render a dinosaur to PNG *from the recompiled code*; then the actor script VM.
 
 ---
 
