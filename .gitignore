@@ -1,0 +1,59 @@
+# Build artifacts
+build/
+out/
+cmake-build-*/
+*.obj
+*.o
+*.lib
+*.exe
+*.dll
+*.pdb
+*.ilk
+*.exp
+
+# IDE
+.vs/
+.vscode/
+*.user
+*.suo
+CMakeSettings.json
+CMakeUserPresets.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Scratch / regeneratable analysis output
+work/
+*.json.bak
+
+# Generated recompiled code
+src/recomp/gen/
+
+# Loose extraction copy (canonical originals live in original/)
+extracted/
+
+# --- Original retail game files: NOT redistributed in this repo ---
+# DinoPark Tycoon (c) 1993 Manley & Associates / MECC. The game is long out of
+# print (abandonware), but copyright most likely still subsists (Houghton Mifflin
+# Harcourt via the MECC -> SoftKey -> TLC -> Mattel -> Riverdeep/HMH chain). To be
+# safe for a public/private repo we keep ALL original binaries and assets
+# local-only. Bring your own copy and drop the files into original/ yourself.
+original/
+Dinopark_Tycoon_1993.zip
+*.EXE
+*.exe
+*.PIC
+*.ACT
+*.ABT
+*.XMI
+*.COM
+*.ADV
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
