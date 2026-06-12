@@ -157,7 +157,14 @@ in parallel — see [`docs/FORMATS.md`](docs/FORMATS.md) (WIP).
   decodes **ALBERT.ACT → Albert the Albertosaurus**, 62×43, **585/585 pixels
   exactly**, in colour. (Also corrected Phase 3: the blitter isn't self-modifying —
   it's CS-scratch + planar VGA + a compiled-blit computed jump.) See [`docs/SPRITES.md`](docs/SPRITES.md).
-- ⏭️ **Next:** a playable bring-up — entry point, main loop, input.
+- 🚀 **Phase 5 — the whole game boots as native code:** `tools/lift_full.py` lifts
+  **all 697 functions (~90,000 lines of C)**, including the Borland `c0` startup;
+  it **compiles, links, and boots** (`scripts/build_boot.ps1` → `work/dino_boot.exe`).
+  The harness loads the 250 KB image, **applies all 4,139 relocations**, seeds the
+  CPU at `0000:0000`, and runs the recompiled startup → DOS init → into game code.
+  Minimal DOS/VGA runtime in `src/recomp/runtime16.c`. See [`docs/BOOT.md`](docs/BOOT.md).
+- ⏭️ **Next (road to interactive):** the custom heap (`FUN_3ee1`), startup→main→game
+  loop, SDL2 video/input — the civ "interactive boot" arc.
 
 ---
 

@@ -1,0 +1,31 @@
+/*
+ * runtime16.h - host runtime surface the lifted DinoPark code calls into.
+ *
+ * The lifter emits three escape hatches: software interrupts (int_handler),
+ * port I/O (port_in8/out8), and address-indirect calls (recomp_dispatch). The
+ * implementations model just enough DOS/VGA for the game to boot.
+ */
+#ifndef DINO_RUNTIME16_H
+#define DINO_RUNTIME16_H
+
+#include "cpu.h"
+
+/* software interrupt: INT 10h video, 16h keyboard, 21h DOS, 33h mouse, 66h Miles */
+void int_handler(CPU *cpu, int vec);
+/* named vectors the lifter emits directly */
+void dos_int21(CPU *cpu);
+void bios_int10(CPU *cpu);
+void bios_int16(CPU *cpu);
+void mouse_int33(CPU *cpu);
+
+/* x86 port I/O — VGA sequencer/GC/DAC/CRTC live here */
+uint8_t port_in8(CPU *cpu, uint16_t port);
+void    port_out8(CPU *cpu, uint16_t port, uint8_t val);
+
+/* address-indirect call/jmp dispatch (generated in recomp_dispatch.c) */
+void recomp_dispatch(CPU *cpu, unsigned seg, unsigned off);
+
+/* boot: load the image + relocations into cpu->mem and seed segment regs */
+int  dino_load_image(CPU *cpu, const char *path);
+
+#endif
