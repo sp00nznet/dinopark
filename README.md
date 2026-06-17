@@ -118,7 +118,11 @@ in parallel — see [`docs/FORMATS.md`](docs/FORMATS.md) (WIP).
 
 ## Status
 
-🚧 **Phase 2 done — named & asset formats cracked.**
+🚧 **Phase 5 — the whole game boots as native code and renders its art.**
+
+From a dusty 1993 floppy to a native executable that runs its real Borland
+startup, reaches `main`, and draws DinoPark's screens and dinosaurs in colour —
+no emulator, no copyrighted bytes in this repo.
 
 - ✅ Rights situation researched (see below) — abandonware; **no game files shipped here**.
 - ✅ Binary triaged: unpacked Borland-C 16-bit DOS exe, **large model**, Miles audio.
@@ -158,13 +162,22 @@ in parallel — see [`docs/FORMATS.md`](docs/FORMATS.md) (WIP).
   exactly**, in colour. (Also corrected Phase 3: the blitter isn't self-modifying —
   it's CS-scratch + planar VGA + a compiled-blit computed jump.) See [`docs/SPRITES.md`](docs/SPRITES.md).
 - 🚀 **Phase 5 — the whole game boots as native code:** `tools/lift_full.py` lifts
-  **all 697 functions (~90,000 lines of C)**, including the Borland `c0` startup;
+  **all ~700 functions (~90,000 lines of C)**, including the Borland `c0` startup;
   it **compiles, links, and boots** (`scripts/build_boot.ps1` → `work/dino_boot.exe`).
-  The harness loads the 250 KB image, **applies all 4,139 relocations**, seeds the
-  CPU at `0000:0000`, and runs the recompiled startup → DOS init → into game code.
-  Minimal DOS/VGA runtime in `src/recomp/runtime16.c`. See [`docs/BOOT.md`](docs/BOOT.md).
-- ⏭️ **Next (road to interactive):** the custom heap (`FUN_3ee1`), startup→main→game
-  loop, SDL2 video/input — the civ "interactive boot" arc.
+  The harness loads the 250 KB image, **applies all 4,139 relocations**, builds a
+  minimal PSP + environment, and runs the recompiled startup: DOS-version check →
+  install interrupt vectors → resize memory → **calls `main`** → runs init via
+  `recomp_dispatch` (function-pointer tables). Minimal DOS/VGA runtime in
+  `src/recomp/runtime16.c`. See [`docs/BOOT.md`](docs/BOOT.md).
+- 🔎 **Boot diagnosis (DS/BSS trace):** ruled out the usual suspects — **`DS` is
+  correct** (`0x3020` DGROUP at every dispatch) and **initialised data loads
+  correctly**. The real blocker before the title screen is **jump-table / `switch`
+  dispatch**: indirect jumps land on mid-function case-blocks, which don't
+  recompile cleanly as standalone functions (garbage = code bytes read as
+  pointers). Convergence harness + instruction-boundary validation in place.
+- ⏭️ **Next (road to interactive):** proper jump-table recovery (lift `switch`
+  cases inline), then startup→main→game loop and SDL2 video/input — the civ
+  "interactive boot" arc.
 
 ---
 
