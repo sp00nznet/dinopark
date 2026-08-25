@@ -16,7 +16,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TOOLS = r"<pcrecomp>"
 sys.path.insert(0, os.path.join(TOOLS, "tools", "disasm"))
 sys.path.insert(0, os.path.join(TOOLS, "tools", "lift"))
-from decode16 import Decoder        # noqa: E402
+from decode16 import Decoder, OpType  # noqa: E402
+import lift16                       # noqa: E402  (to set _CODE_SEG per function)
 from lift16 import Lifter           # noqa: E402
 
 HDR = 0x4800
@@ -24,6 +25,60 @@ EXE = os.path.join(ROOT, "original", "DINOPARK.EXE")
 OUT = os.path.join(ROOT, "src", "recomp", "gen")
 CHUNK = 60
 ENTRY_IMG = 0x0000                 # CS:IP = 0000:0000 -> image offset 0
+
+
+def build_segmap(data, ends, decode):
+    """image offset -> the code segment (CS) each function runs under.
+
+    Large-model Borland splits the program across ~29 code segments, and a
+    function's CS decides what `cs:[bx+table]` (every switch) and every near
+    indirect dispatch actually read. Nothing in functions.json records it, so
+    recover it:
+
+      1. A far call/jmp `9A/EA seg:off` states its target's CS outright.
+      2. A near call cannot leave its segment, so both ends share one CS --
+         flood-fill the seeds across near-call edges.
+      3. Anything still unseeded takes the segment of the nearest seeded
+         function below it (the linker lays segments out in order).
+
+    Every assignment is guarded by `0 <= fn - CS*16 < 0x10000`: an offset that
+    does not fit in 16 bits cannot be that segment, whatever the edge says.
+    """
+    import bisect, collections
+    seg, near = {}, collections.defaultdict(set)
+    for s in sorted(ends):
+        for i in decode(s):
+            o = i.op1
+            if i.mnemonic in ("call", "call far", "jmp", "jmp far") and o and o.type == OpType.FAR:
+                seg[(o.far_seg * 16 + o.disp) & 0xFFFFF] = o.far_seg
+            elif i.mnemonic == "call" and o and o.type == OpType.REL16:
+                t = s + o.disp
+                if t in ends:
+                    near[s].add(t); near[t].add(s)
+    n_seed = sum(1 for s in ends if s in seg)
+
+    fits = lambda fn, cs: 0 <= fn - cs * 16 < 0x10000
+    work = [s for s in seg if s in ends]
+    while work:
+        a = work.pop()
+        for b in near[a]:
+            if b not in seg and fits(b, seg[a]):
+                seg[b] = seg[a]; work.append(b)
+    n_prop = sum(1 for s in ends if s in seg)
+
+    ks = sorted(k for k in seg if k in ends)
+
+    def cs_of(fn):
+        if fn in seg and fits(fn, seg[fn]):
+            return seg[fn]
+        i = bisect.bisect_right(ks, fn) - 1
+        while i >= 0:                       # nearest seeded below that still fits
+            if fits(fn, seg[ks[i]]):
+                return seg[ks[i]]
+            i -= 1
+        return fn >> 4                      # last resort: its own paragraph
+    print(f"  segments: {n_seed} far-seeded, {n_prop}/{len(ends)} after near-propagation")
+    return cs_of
 
 
 def main():
@@ -105,14 +160,35 @@ def main():
     print(f"  startup: fn_00000=[0,0x{first_det:X}) + {len(ct)} call-target subroutines")
 
     os.makedirs(OUT, exist_ok=True)
+    _dcache = {}
+
+    def decode(s):
+        if s not in _dcache:
+            try:
+                _dcache[s] = Decoder(data[s + HDR:det_end[s] + HDR], base_offset=s).decode_all()
+            except Exception:
+                _dcache[s] = []
+        return _dcache[s]
+
+    cs_of = build_segmap(data, det_end, decode)
+
     bodies, all_calls, lifted = [], set(), 0
+    segs_used = set()
     for name, io, end in funcs:
         fstart, fend = io + HDR, end + HDR
+        cs = cs_of(io)
+        segs_used.add(cs)
         try:
             insns = Decoder(data[fstart:fend], base_offset=io).decode_all()
             lifter = Lifter(hdr_size=HDR, known_funcs=known)
             lifter.dispatch = True       # emit real recomp_dispatch for indirect call/jmp
-            bodies.append(lifter.lift_function(name, insns, io, is_far=True))
+            # cs-relative reads (switch tables, `push cs`) must use this constant:
+            # cpu->cs is set once at load and goes stale across the C-call dispatch.
+            lift16._CODE_SEG = f"{cs:04X}"
+            body = lifter.lift_function(name, insns, io, is_far=True)
+            # keep the live cpu->cs honest too -- traces and the runtime read it.
+            bodies.append(body.replace("(CPU *cpu)\n{",
+                                       f"(CPU *cpu)\n{{\n    cpu->cs = SEG_{cs:04X};", 1))
             all_calls |= lifter.func_calls
             lifted += 1
         except Exception as e:
@@ -137,6 +213,9 @@ def main():
     with open(os.path.join(OUT, "recomp_all.h"), "w") as f:
         f.write("#ifndef RECOMP_ALL_H\n#define RECOMP_ALL_H\n")
         f.write('#include "../cpu.h"\n#include "../runtime16.h"\n\n')
+        for sg in sorted(segs_used):
+            f.write(f"#define SEG_{sg:04X} 0x{sg:04X}\n")
+        f.write("\n")
         for n in names:
             f.write(f"void {n}(CPU *cpu);\n")
         f.write("\n#endif\n")
@@ -204,6 +283,7 @@ void recomp_dispatch(CPU *cpu, unsigned seg, unsigned off) {
             f.write(f"void {s}(CPU *cpu) {{ (void)cpu; }}\n")
 
     print(f"Lifted {lifted}/{len(funcs)} functions -> {nchunks} chunks in {OUT}")
+    print(f"  code segments: {len(segs_used)}")
     print(f"  dispatch entries: {len(names)}  unresolved-call stubs: {len(stubs)}")
     print(f"  entry image offset: 0x{ENTRY_IMG:05X}"
           + ("  (a detected function)" if ENTRY_IMG in known else "  (NOT detected — startup stub needed)"))

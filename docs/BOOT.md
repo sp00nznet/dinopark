@@ -50,30 +50,75 @@ bounded:
 - a **watchdog thread** (`DINO_WATCHDOG`, default 8s) that force-exits any
   non-dispatch busy-wait.
 
-### Diagnosis (DS/BSS trace) — root cause is jump-table dispatch
+### Diagnosis, round 2 — the segment map (fixed) and the `_INIT_` walk (open)
 
-Traced it. Two suspects **ruled out**, one **confirmed**:
+Traced it. Three suspects: two ruled out, one **fixed**, one still open.
 
 - ✅ **DS is correct.** Every dispatch runs with `ds=3020` (DGROUP) — not a
   segment bug.
-- ✅ **Initialized data loads correctly.** The DGROUP hook pointers read right
-  from the image (`DAT_4020_7624 = 0000:15AC`, init count = 0), and the
-  convergence registers only **valid instruction-boundary** init targets (32 of
-  88 raw misses; the other 56 were garbage addresses that, when forced, corrupted
-  the lift — now filtered by decoding the containing function).
-- ❌ **Root cause: jump-table / switch dispatch.** The garbage dispatch targets
-  are **code bytes read as pointers** — e.g. `EC8B:5500` = `mov sp,bp; push bp`,
-  `8B55` = `push bp; mov bp,sp`. Indirect **jumps** (`jmp word [table+bx]`, i.e.
-  C `switch`) land on mid-function case-blocks (`0x1C0F` = `+0x23` into
-  `fn_01BEC`). Dispatching a case-block as a standalone function runs it with the
-  wrong register/stack state, so it computes addresses into the code segment and
-  reads instructions as data → cascading garbage.
+- ✅ **Initialised data loads correctly.** The DGROUP hook pointers read right
+  from the image (`DAT_4020_7624 = 0000:15AC`, init count = 0).
+- ✅ **FIXED — CS was stale for every function.** `lift16` keeps a per-function
+  code-segment constant (`_CODE_SEG`) that every `cs:`-relative read and every
+  near indirect dispatch resolves through; when it is unset the lifter falls back
+  to `cpu->cs`, which `runtime16.c` sets once at load and never maintains across
+  the C-call dispatch. `lift_full.py` never set it, so **all 53 `jmp word
+  cs:[bx+table]` switch tables (and every `push cs`) read from the wrong
+  segment** — which is where the "code bytes read as function pointers" came
+  from. `build_segmap()` now recovers each function's CS and the lifter emits
+  `SEG_xxxx` constants; see *The segment map* below. Effect: the cumulative
+  dispatch-miss set drops from **88 to 7**, i.e. 81 of the 88 were artefacts of
+  the wrong segment. (Those 88 were also being fed back as forced function
+  starts, which corrupted the lift — delete `work/dino_misses.txt` when
+  changing anything upstream of it.)
+- ❌ **Open — the Borland `_INIT_` table walk runs on garbage bounds.** All 42
+  dispatches in a boot come from one loop, in the startup region (`fn_00000`,
+  `SEG_0000`), at image `0x1ED..0x230`:
 
-So the next frontier is **proper jump-table handling**: recover each `jmp
-word [cs:table]` / `jmp word [bx*2+disp]`, read its entries from the image, and
-either lift the cases inline within the enclosing function or dispatch them with
-the enclosing frame intact (the hard part of any 16-bit recomp). Debug env:
-`DINO_TRACE=1` (per-dispatch ds/cs/target), `DINO_DBG=1` (INT 21h).
+  ```
+  001F8  cmp byte es:[bx], 0xFF        ; walk ES:SI .. ES:DI,
+  001FE  mov cl,  byte es:[bx+0x1]     ; 6-byte records {flag, priority, far ptr}
+  0020C  add bx, 0x6                   ; pick the lowest-priority unrun entry
+  ...
+  00222  call far word es:[bx+0x2]     ; ...and call it
+  00229  call word es:[bx+0x2]         ; (near variant)
+  ```
+
+  That is Borland's init/exit-list walker over the linker-built `_INIT_`
+  segment. `ES:SI`/`ES:DI` are linker-defined segment bounds materialised as
+  **relocated immediates**; if they do not land on the real table the loop walks
+  arbitrary memory calling whatever it reads. The remaining 7 misses confirm it:
+  none of them is a valid instruction boundary, so they are still bad pointers,
+  not switch arms. Next step is to check what `ES:SI..ES:DI` actually hold at
+  entry against the relocation-applied image.
+
+  (Switch-arm recovery — lifting `case` blocks inline instead of
+  tail-dispatching them, upstream's `3412d02` for the 32-bit path — is still
+  wanted, but the boot does not reach a `switch` yet, so it is not the blocker.)
+
+## The segment map
+
+Large-model Borland splits DinoPark across **29 code segments**, and a function's
+CS decides what its switch tables and near indirect dispatches read.
+`work/functions.json` records only flat image offsets, so `build_segmap()` in
+`tools/lift_full.py` recovers CS:
+
+1. A far `call`/`jmp` `9A/EA seg:off` states its target's CS outright — **258
+   detected functions** seeded directly, with **zero conflicts**.
+2. A near call cannot leave its segment, so both ends share one CS — flood-fill
+   the seeds across near-call edges (**380/693**).
+3. Anything still unseeded takes the nearest seeded function below it (the linker
+   lays segments out in order).
+
+Every assignment is guarded by `0 <= fn - CS*16 < 0x10000`: an offset that does
+not fit in 16 bits cannot belong to that segment, whatever the edge says.
+
+Independently checked: brute-forcing CS at each `jmp word cs:[bx+disp]` site
+under the constraint that *every* table entry must land on a valid instruction
+boundary in the enclosing function solves **50 of the 53 tables**, and every
+answer agrees with the map above (`fn_15764` → `SEG_13C5`, and so on). The 3
+that do not solve are the sparse switch form — a `cmp/je/add bx,2/loop` scan
+over `{value, offset}` pairs — which needs its own table reader.
 
 ## The runtime so far (`runtime16.c`)
 
