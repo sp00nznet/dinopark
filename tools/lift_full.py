@@ -135,6 +135,18 @@ def main():
             return False
         return t in offs
 
+    _dcache = {}
+
+    def decode(s):
+        if s not in _dcache:
+            try:
+                _dcache[s] = Decoder(data[s + HDR:det_end[s] + HDR], base_offset=s).decode_all()
+            except Exception:
+                _dcache[s] = []
+        return _dcache[s]
+
+    cs_of = build_segmap(data, det_end, decode)
+
     forced_targets = set()
     if os.path.exists(miss_path):
         for line in open(miss_path):
@@ -149,7 +161,7 @@ def main():
     # thousands of calls land mid-function. Anything a far call points at is a
     # function entry by definition -- register the ones that are real
     # instruction boundaries.
-    n_farfix = 0
+    n_farfix = n_nearfix = 0
     for s in sorted(starts):
         try:
             insns = Decoder(data[s + HDR:det_end[s] + HDR], base_offset=s).decode_all()
@@ -162,8 +174,17 @@ def main():
                 if t not in starts and t not in forced_targets and valid_boundary(t):
                     forced_targets.add(t)
                     n_farfix += 1
-    if n_farfix:
-        print(f"  far-call targets promoted to functions: {n_farfix}")
+            if ins.mnemonic == 'call' and o and o.type == OpType.REL16:
+                # Same hole on the near side: an unresolved near call is
+                # named res_XXXXXX and stubbed out, so it silently does
+                # nothing. Wrap the target the way the lifter will.
+                base = cs_of(s) * 16
+                t = base + ((s - base + o.disp) & 0xFFFF)
+                if t not in starts and t not in forced_targets and valid_boundary(t):
+                    forced_targets.add(t)
+                    n_nearfix += 1
+    if n_farfix or n_nearfix:
+        print(f"  call targets promoted to functions: {n_farfix} far, {n_nearfix} near")
 
     funcs = [("fn_00000", 0, first_det)]                # whole startup (jmp labels)
     ct = sorted(call_tgts)
@@ -190,18 +211,6 @@ def main():
     print(f"  startup: fn_00000=[0,0x{first_det:X}) + {len(ct)} call-target subroutines")
 
     os.makedirs(OUT, exist_ok=True)
-    _dcache = {}
-
-    def decode(s):
-        if s not in _dcache:
-            try:
-                _dcache[s] = Decoder(data[s + HDR:det_end[s] + HDR], base_offset=s).decode_all()
-            except Exception:
-                _dcache[s] = []
-        return _dcache[s]
-
-    cs_of = build_segmap(data, det_end, decode)
-
     bodies, all_calls, lifted, n_wrapped = [], set(), 0, 0
     segs_used = set()
     for name, io, end in funcs:

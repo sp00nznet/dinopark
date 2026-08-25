@@ -34,4 +34,8 @@ int  dino_load_image(CPU *cpu, const char *path);
 
 void catz_div0(const char *kind);   /* divide-by-zero from lifted code */
 
+/* present mem[0xA0000] in the window / to a BMP */
+void vga_flush(CPU *cpu);
+void vga_snapshot(CPU *cpu, const char *path);
+
 #endif

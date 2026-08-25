@@ -94,29 +94,60 @@ into whatever precedes them. Anything a far call points at is a function by
 definition, so those targets are promoted statically (90 of them) rather than
 waiting for a runtime miss. Unresolved far calls: **3,574 -> 25**.
 
+### Pixels
+
+There is a window now. `src/recomp/video.c` presents a 320x200 8-bit
+framebuffer through Win32 GDI -- an 8-bit DIB takes the VGA palette directly,
+so it costs no dependency, and it also writes a BMP so a headless run leaves
+something to look at.
+
+Two things feed it:
+
+- **`scripts\build_pic.ps1`** decodes a `.PIC` with the lifted `fn_1907` and
+  shows it. `tools/gallery.py` does every file at once.
+- **The boot runtime** opens the window when the game sets mode 13h and
+  presents `mem[0xA0000]` on the retrace poll, which is where the game paces
+  itself anyway. `work/vga_exit.bmp` is written on the way out either way.
+
+### What the game needed before it would draw
+
+It was refusing on its own terms, and we were not listening. Implementing INT
+21h AH=09 (print string) and AH=40 (write) put its complaints on stdout:
+
+- *"This program can only run on an MCGA or VGA system"* -- INT 10h AH=1A, the
+  display-combination-code call, was a stub returning nothing, which reads as a
+  CGA. It now answers VGA, along with AH=0F and AH=12/BL=10.
+- **`open 'product.pf'` failed.** The game asks for its files by bare name, the
+  way it would on the floppy it shipped on; they live in `original/`.
+  `open_game_file()` tries the working directory and falls back there, stripping
+  DOS drive letters and backslashes.
+
+With both fixed the game opens `PRODUCT.PF` and **sets mode 13h**. The window
+opens. It has not drawn anything yet.
+
 ### Where it stops now
 
-The boot runs DinoPark's real init and no longer returns early -- the watchdog
-stops it. It allocates memory (`AH=48`), selects drives (`AH=0E`/`19`), checks
-file attributes (`AH=43`), and reaches console I/O (`AH=07`/`0B`/`40`) -- the
-game's disk-check startup. With convergence rounds on top it gets as far as
-`AH=3D` file opens and `INT 10h` mode sets.
+`Stack overflow!` -- Borland's own runtime check, firing before the first draw.
+SP is not draining gradually, it is being corrupted: it lands at values well
+outside the 8 KB stack (`_stklen` = 0x2000, checked against the image, and the
+stack sits directly above DGROUP where it should).
 
-Open, in rough order:
+Ruled out so far:
 
-- **The convergence loop oscillates** once it is deep enough (round 4 hit 2,236
-  dispatches and 309 mode sets, round 5 fell back to 111 and 0). Some forced
-  target is wrong; the boundary filter needs to be stricter than "decodes as an
-  instruction".
-- **Filenames reaching `AH=3D` are garbage**, so the pointer handed to the open
-  path is wrong -- most likely a `DS`/`SS` mix-up in the caller.
-- **Runtime gaps**: `AH=40` (write), `AH=43` (file attributes), `AH=09` (print
-  string), `AH=0B`/`07` (console status/input) are all still unhandled.
-- **Switch arms.** Now that far calls resolve, the 53 `cs:[bx+table]` dispatches
-  will start being reached, and a case block cannot be lifted as a standalone
-  function -- upstream's `3412d02` does this for the 32-bit path by following the
-  table at decode time and emitting a computed goto. The 16-bit port is still
-  wanted; it is simply no longer the first thing in the way.
+- **Not far-call/near-ret mismatch.** All 2,300 far call sites reach functions
+  that end in `retf`; no site reaches a near-`ret` one.
+- **Not the `push cs; call near` idiom** (895 of 1136 near calls), which looked
+  like a missing return word: `lift16` already pushes the sentinel, so `push cs`
+  plus that sentinel makes a complete far frame for the callee's `retf`.
+- **Not runaway recursion.** 92 dispatches in a whole boot, and the depth cap
+  never fires.
+
+The live suspect is the `retf`-as-trampoline path: `retf` pops CS:IP and hands
+them to `recomp_dispatch`, which calls the target **without pushing a frame of
+its own**. When that target ends in its own `retf` it pops four bytes belonging
+to somebody else. The trace shows exactly that shape -- dispatches to
+`0000:3D04` (that is SS) and `7B62:3020` (the `_INIT_` offset and DGROUP, i.e.
+somebody's pushed `si`/`ds` read back as a return address).
 
 ## The segment map
 

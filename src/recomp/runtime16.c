@@ -6,6 +6,7 @@
  * services are logged-and-stubbed; we fill them in as the boot demands them.
  */
 #include "runtime16.h"
+#include "video.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -33,6 +34,25 @@ static void read_fname(CPU *cpu, uint16_t seg, uint16_t off, char *out, int n) {
     out[i] = 0;
 }
 
+/* The game asks for its data files by bare name, the way it would on the
+ * floppy it shipped on. They live in original/ here, so try the working
+ * directory first and fall back to there. DOS paths are backslashed and may
+ * carry a drive letter; strip both. */
+static FILE *open_game_file(const char *name, const char *mode)
+{
+    FILE *f = fopen(name, mode);
+    if (f) return f;
+
+    const char *base = name;
+    if (base[0] && base[1] == ':') base += 2;          /* drop C: */
+    for (const char *p = base; *p; p++)
+        if (*p == '\\' || *p == '/') base = p + 1;   /* keep the last component */
+
+    char path[256];
+    snprintf(path, sizeof path, "original/%s", base);
+    return fopen(path, mode);
+}
+
 /* ---- VGA register state (modelled minimally) --------------------------- */
 static uint8_t g_seq_index, g_gc_index, g_crtc_index;
 static uint8_t g_map_mask = 0x0F;          /* sequencer reg 2 */
@@ -40,10 +60,38 @@ static uint8_t g_dac_wr, g_dac_comp;
 static int     g_dac_chan;
 static uint8_t g_palette[256][3];
 
+/* Mode 13h is 320x200 linear at A000:0000, which in this flat memory model is
+ * just mem[0xA0000] -- the lifted code writes pixels straight there and no
+ * plane emulation is involved. (An unchained/Mode-X screen would need the map
+ * mask honoured on write; nothing has asked for one yet.) */
+#define VGA_BASE 0xA0000u
+#define VGA_W 320
+#define VGA_H 200
+static int g_vga_live;
+static uint8_t g_video_mode = 0x03;
+
+void vga_flush(CPU *cpu)
+{
+    if (!g_vga_live) return;
+    vga_window_present(&cpu->mem[VGA_BASE], (const uint8_t *)g_palette);
+}
+
+void vga_snapshot(CPU *cpu, const char *path)
+{
+    vga_write_bmp(path, &cpu->mem[VGA_BASE], VGA_W, VGA_H,
+                  (const uint8_t *)g_palette);
+}
+
 uint8_t port_in8(CPU *cpu, uint16_t port) {
-    (void)cpu;
     switch (port) {
-        case 0x3DA: { static uint8_t t; t ^= 0x09; return t; }  /* CRT status: toggle retrace */
+        case 0x3DA: {                    /* CRT status: toggle retrace */
+            /* The game polls this to pace itself, which makes it the natural
+             * place to put a frame on screen. Throttled: the poll spins far
+             * faster than anything needs redrawing. */
+            static uint8_t t; static unsigned n;
+            if (g_vga_live && ((n++ & 0x3FF) == 0)) vga_flush(cpu);
+            t ^= 0x09; return t;
+        }
         case 0x3C5: return g_map_mask;
         case 0x3CF: return 0;
         case 0x3C9: return 0x3F;
@@ -72,7 +120,7 @@ void port_out8(CPU *cpu, uint16_t port, uint8_t val) {
 /* ---- software interrupts ---------------------------------------------- */
 static void int21(CPU *cpu) {
     uint8_t ah = cpu->ah;
-    if (getenv("DINO_DBG")) fprintf(stderr, "[INT21] AH=%02X BX=%04X CX=%04X\n", ah, cpu->bx, cpu->cx);
+    if (getenv("DINO_DBG")) fprintf(stderr, "[INT21] AH=%02X BX=%04X CX=%04X SS:SP=%04X:%04X BP=%04X\n", ah, cpu->bx, cpu->cx, cpu->ss, cpu->sp, cpu->bp);
     switch (ah) {
         case 0x25: case 0x35: break;                 /* get/set int vector - ignore */
         case 0x30: cpu->ax = 0x0005; break;          /* DOS version 5.0 */
@@ -86,7 +134,7 @@ static void int21(CPU *cpu) {
         case 0x3D: {                                 /* open file */
             char name[128]; read_fname(cpu, cpu->ds, cpu->dx, name, sizeof name);
             int fh = -1; for (int i = 5; i < MAXFH; i++) if (!g_fh[i]) { fh = i; break; }
-            FILE *f = fh >= 0 ? fopen(name, "rb") : NULL;
+            FILE *f = fh >= 0 ? open_game_file(name, "rb") : NULL;
             trace("[INT21] open '%s' -> %s fh=%d\n", name, f ? "ok" : "FAIL", fh);
             if (f) { g_fh[fh] = f; cpu->ax = fh; cpu->flags &= ~FLAG_CF; }
             else   { cpu->ax = 2; cpu->flags |= FLAG_CF; }
@@ -109,6 +157,26 @@ static void int21(CPU *cpu) {
             }
             cpu->flags &= ~FLAG_CF; break;
         }
+        case 0x09: {                                 /* print string, $-terminated */
+            /* The game talks to us here. Route it to stdout: a startup that
+             * bails out says why, and we were throwing the reason away. */
+            uint32_t a = seg_off(cpu->ds, cpu->dx);
+            for (int i = 0; i < 4096 && cpu->mem[a + i] != '$'; i++)
+                putchar(cpu->mem[a + i]);
+            fflush(stdout); break;
+        }
+        case 0x40: {                                 /* write to handle */
+            uint32_t a = seg_off(cpu->ds, cpu->dx);
+            uint16_t n = cpu->cx;
+            int fh = cpu->bx;
+            if (fh == 1 || fh == 2) {                /* stdout / stderr */
+                fwrite(&cpu->mem[a], 1, n, fh == 2 ? stderr : stdout);
+                fflush(fh == 2 ? stderr : stdout);
+            } else if (fh >= 0 && fh < MAXFH && g_fh[fh]) {
+                fwrite(&cpu->mem[a], 1, n, g_fh[fh]);
+            }
+            cpu->ax = n; cpu->flags &= ~FLAG_CF; break;
+        }
         case 0x44:                                   /* IOCTL: get device info */
             /* Borland's _setupio asks whether each standard handle is a
              * character device, to decide which ones to line-buffer. Report
@@ -129,8 +197,40 @@ void mouse_int33(CPU *cpu){ int_handler(cpu, 0x33); }
 void int_handler(CPU *cpu, int vec) {
     switch (vec) {
         case 0x21: int21(cpu); break;
-        case 0x10: /* video BIOS */
-            if (cpu->ah == 0x00) trace("[INT10] set mode %02X\n", cpu->al);
+        case 0x10:                                  /* video BIOS */
+            switch (cpu->ah) {
+                case 0x00:                          /* set mode */
+                    trace("[INT10] set mode %02X\n", cpu->al);
+                    g_video_mode = cpu->al;
+                    if (cpu->al == 0x13) {
+                        g_vga_live = vga_window_open("DinoPark", VGA_W, VGA_H);
+                        memset(&cpu->mem[VGA_BASE], 0, VGA_W * VGA_H);
+                    }
+                    break;
+                case 0x0F:                          /* get current mode */
+                    cpu->al = g_video_mode;
+                    cpu->ah = (g_video_mode == 0x13) ? 40 : 80;   /* columns */
+                    cpu->bh = 0;
+                    break;
+                case 0x12:                          /* EGA/VGA config */
+                    if (cpu->bl == 0x10) {          /* get EGA info */
+                        cpu->bh = 0;                /* colour mode */
+                        cpu->bl = 3;                /* 256K installed */
+                        cpu->cx = 0;
+                    }
+                    break;
+                case 0x1A:                          /* display combination code */
+                    /* The game refuses to start without this: it is how you
+                     * ask the BIOS whether the adapter is VGA/MCGA, and a
+                     * stub that answers nothing reads as a CGA. */
+                    if (cpu->al == 0x00) {
+                        cpu->al = 0x1A;             /* function supported */
+                        cpu->bl = 0x08;             /* active: VGA w/ colour */
+                        cpu->bh = 0x00;             /* no second adapter */
+                    }
+                    break;
+                default: trace("[INT10] AH=%02X AL=%02X (unhandled)\n", cpu->ah, cpu->al); break;
+            }
             break;
         case 0x16: cpu->ax = 0; cpu->flags |= FLAG_ZF; break;  /* keyboard: no key */
         case 0x33: cpu->ax = 0; break;                          /* mouse: absent */

@@ -23,10 +23,18 @@
 #include <string.h>
 #include "recomp/cpu.h"
 #include "recomp/gen/dino_decode.h"
+#include "recomp/video.h"
 
 #define SEG_SRC 0x2000
 #define SEG_DST 0x5000
 #define SEG_SS  0x8000
+
+#ifdef _WIN32
+#include <windows.h>
+static void sleep_ms(int ms) { Sleep((DWORD)ms); }
+#else
+static void sleep_ms(int ms) { (void)ms; }
+#endif
 
 static unsigned u16(const unsigned char *d, int o){ return d[o] | (d[o+1] << 8); }
 static unsigned u32(const unsigned char *d, int o){ return u16(d,o) | (u16(d,o+2) << 16); }
@@ -40,13 +48,35 @@ int main(int argc, char **argv)
     unsigned char *file = malloc(n); fread(file, 1, n, f); fclose(f);
     if (memcmp(file, "UNCP", 4) != 0) { fprintf(stderr, "not UNCP\n"); return 1; }
 
-    unsigned W = u16(file, 12), H = u16(file, 14);
-    unsigned tail = u32(file, 8) + 12;     /* block size is rel. to +12; RLE ends here */
-    unsigned PAL = 16, IMG = 16 + 768;     /* palette then RLE stream */
+    /* UNCP is a block container, not a single picture:
+     *   +0  "UNCP"
+     *   +4  u32 off0          offset of block 0
+     *   +8  u32 off[n]        offsets of blocks 1..n, n = (off0 - 8) / 4
+     * and each block is
+     *   +0  u32 size          bytes following this field
+     *   +4  u16 W  +6 u16 H
+     *   +8  u8 palette[768]   256 * 6-bit RGB
+     *   +776 RLE stream
+     * A full-screen picture is simply the one-block case, which is why the
+     * single-screen offsets (W at 12, palette at 16, pixels at 784) worked. */
+    unsigned off0 = u32(file, 4);
+    unsigned nblk = 1 + (off0 > 8 ? (off0 - 8) / 4 : 0);
+    unsigned want = argc > 2 ? (unsigned)atoi(argv[2]) : 0;
+    if (want >= nblk) { fprintf(stderr, "block %u of %u\n", want, nblk); return 1; }
+    unsigned blk = want == 0 ? off0 : u32(file, 8 + (want - 1) * 4);
+
+    unsigned W = u16(file, blk + 4), H = u16(file, blk + 6);
+    unsigned tail = blk + 4 + u32(file, blk);   /* RLE ends here */
+    unsigned PAL = blk + 8, IMG = blk + 8 + 768;
     unsigned count = W * H;
     if (tail > (unsigned)n) tail = n;
-    printf("%s : %ux%u (%u px), palette[16:784], RLE stream [%u:%u]\n",
-           path, W, H, count, IMG, tail);
+    if (!W || !H || count > 0x10000u) {
+        fprintf(stderr, "block %u: implausible %ux%u\n", want, W, H);
+        return 2;
+    }
+    printf("%s [block %u/%u] : %ux%u, RLE [%u:%u]\n",
+           path, want, nblk, W, H, IMG, tail);
+
 
     /* the 768-byte 6-bit palette rides right after W/H; index 0 -> black */
     unsigned char pal[768];
@@ -75,5 +105,17 @@ int main(int argc, char **argv)
     FILE *m = fopen("work/pic_dims.txt", "w");
     if (m) { fprintf(m, "%u %u\n", W, H); fclose(m); }
     printf("wrote work/pic_decoded.bin (%ux%u 8bpp) + work/pic_palette.pal\n", W, H);
+
+    /* The same bytes, on screen. What the lifted blitter just produced is
+     * exactly the framebuffer the game would have handed to mode 13h. */
+    vga_write_bmp("work/pic_render.bmp", out, W, H, pal);
+    if (!getenv("DINO_NOWINDOW") && vga_window_open(path, W, H)) {
+        vga_window_present(out, pal);
+        puts("window open - Esc or close it to exit");
+        while (vga_window_pump()) {
+            vga_window_present(out, pal);   /* repaint on expose */
+            sleep_ms(16);
+        }
+    }
     return 0;
 }
