@@ -29,72 +29,94 @@ work\dino_boot.exe          # loads the image, runs the recompiled startup
   (`lifter.dispatch=True` → `recomp_dispatch` reads the function pointer from
   memory and calls the target by address). It boots cleanly — no crash.
 
-## Convergence harness + the current frontier
+## Convergence harness
 
-The indirect-call misses are addressed by an **iterative convergence loop**:
-`recomp_dispatch` records in-range misses → `recomp_dump_misses` writes them to
-`work/dino_misses.txt` → `lift_full.py` reads them back as forced function starts
-(mid-function jump-table / init-routine entry points) → re-lift → repeat.
+Indirect-call misses are fed back round by round: `recomp_dispatch` records
+in-range misses, `recomp_dump_misses` writes `work/dino_misses.txt`, and
+`lift_full.py` reads them back as forced function starts (filtered to real
+instruction boundaries inside their containing function). `scripts/converge.ps1`
+runs lift -> build -> boot -> collect in a loop.
 
-Round 1 found **5 in-range misses** — all mid-function targets (e.g. `0x1C0F` =
-`+0x23` into `fn_01BEC`). Registering them lets the boot run **much** deeper:
-~**264 indirect dispatches** through the game's init.
+Delete `work/dino_misses.txt` whenever anything upstream of it changes. A miss
+recorded under a bug is usually a bad pointer, and forcing bad pointers as
+function starts corrupts the next lift.
 
-**The frontier now is data-setup correctness.** Past the first init routines, the
-dispatch starts reading *garbage* function pointers — e.g. `06EC:8B55`, whose
-bytes `55 8B EC` are `push bp; mov bp,sp`, i.e. a pointer landing in **code**. So
-some structure is read with the wrong segment/offset or before it's initialized,
-and the game enters a **busy-wait** on bad state. Safeguards keep the boot
-bounded:
-- a **dispatch budget** (`DINO_BUDGET`, default 200k) for dispatch-driven spins;
-- a **watchdog thread** (`DINO_WATCHDOG`, default 8s) that force-exits any
-  non-dispatch busy-wait.
+## Five bugs between "boots cleanly" and "runs the game"
 
-### Diagnosis, round 2 — the segment map (fixed) and the `_INIT_` walk (open)
+The boot used to reach `main`, dispatch into garbage, and return. It looked like
+a data-setup problem. It was five separate things, and the first one hid the
+other four.
 
-Traced it. Three suspects: two ruled out, one **fixed**, one still open.
+**1. The build had been failing silently since June.** `converge.ps1` decided a
+round succeeded by testing whether `work/dino_boot.exe` existed -- and it always
+existed, left over from the last build that worked. Every measurement for weeks
+was of the same stale binary. It now deletes the exe before building.
 
-- ✅ **DS is correct.** Every dispatch runs with `ds=3020` (DGROUP) — not a
-  segment bug.
-- ✅ **Initialised data loads correctly.** The DGROUP hook pointers read right
-  from the image (`DAT_4020_7624 = 0000:15AC`, init count = 0).
-- ✅ **FIXED — CS was stale for every function.** `lift16` keeps a per-function
-  code-segment constant (`_CODE_SEG`) that every `cs:`-relative read and every
-  near indirect dispatch resolves through; when it is unset the lifter falls back
-  to `cpu->cs`, which `runtime16.c` sets once at load and never maintains across
-  the C-call dispatch. `lift_full.py` never set it, so **all 53 `jmp word
-  cs:[bx+table]` switch tables (and every `push cs`) read from the wrong
-  segment** — which is where the "code bytes read as function pointers" came
-  from. `build_segmap()` now recovers each function's CS and the lifter emits
-  `SEG_xxxx` constants; see *The segment map* below. Effect: the cumulative
-  dispatch-miss set drops from **88 to 7**, i.e. 81 of the 88 were artefacts of
-  the wrong segment. (Those 88 were also being fed back as forced function
-  starts, which corrupted the lift — delete `work/dino_misses.txt` when
-  changing anything upstream of it.)
-- ❌ **Open — the Borland `_INIT_` table walk runs on garbage bounds.** All 42
-  dispatches in a boot come from one loop, in the startup region (`fn_00000`,
-  `SEG_0000`), at image `0x1ED..0x230`:
+**2. CS was stale for every function.** `lift16` resolves every `cs:`-relative
+read and every near indirect dispatch through a per-function code-segment
+constant, `_CODE_SEG`; unset, it falls back to `cpu->cs`, which `runtime16.c`
+writes once at load and never maintains across the C-call dispatch. So all 53
+`jmp word cs:[bx+table]` switch dispatches read their table from the wrong
+segment. `build_segmap()` recovers the real map -- see below.
 
-  ```
-  001F8  cmp byte es:[bx], 0xFF        ; walk ES:SI .. ES:DI,
-  001FE  mov cl,  byte es:[bx+0x1]     ; 6-byte records {flag, priority, far ptr}
-  0020C  add bx, 0x6                   ; pick the lowest-priority unrun entry
-  ...
-  00222  call far word es:[bx+0x2]     ; ...and call it
-  00229  call word es:[bx+0x2]         ; (near variant)
-  ```
+**3. `dispatch_near` did not exist.** For a near indirect call the lifter emits
+`push16(cpu,0xFFFF); dispatch_near(...)`: a dummy return word, then the call.
+On a miss that word has to come back off, or the caller's frame sits one slot
+low. Nothing defined the function, and its absence is what turned a single
+missed `_INIT_` entry into the endless stream of code-bytes-as-pointers -- the
+walker's own `bx`/`si` were being read off a desynchronised stack.
 
-  That is Borland's init/exit-list walker over the linker-built `_INIT_`
-  segment. `ES:SI`/`ES:DI` are linker-defined segment bounds materialised as
-  **relocated immediates**; if they do not land on the real table the loop walks
-  arbitrary memory calling whatever it reads. The remaining 7 misses confirm it:
-  none of them is a valid instruction boundary, so they are still bad pointers,
-  not switch arms. Next step is to check what `ES:SI..ES:DI` actually hold at
-  entry against the relocation-applied image.
+**4. The startup ran under the wrong CS.** With no seeded function below it, the
+Borland startup fell through to a last-resort "its own paragraph" rule and got
+`SEG_001E`, so its near calls dispatched into a segment nothing else shared. The
+MZ header already says otherwise: entry is `0000:0000`, so image offset 0 is
+seeded with CS=0 like any far-call target.
 
-  (Switch-arm recovery — lifting `case` blocks inline instead of
-  tail-dispatching them, upstream's `3412d02` for the 32-bit path — is still
-  wanted, but the boot does not reach a `switch` yet, so it is not the blocker.)
+**5. Near call/jmp targets did not wrap.** A near target is `CS:(IP + rel)` and
+that offset wraps at 16 bits; the lifter resolves it as `func_start + disp`,
+which is the same thing only when it does not wrap. Every call backwards past
+the segment base wraps, and **707 of DinoPark's 1136 near calls** (62%) resolved
+somewhere arbitrary. `lift_full.py` now rewrites `disp` to the wrap-correct
+target before lifting, the same trick bolo uses.
+
+**6. Every far call compiled to an empty stub.** `lift16` resolved far targets
+with formulas carried over from Civ (`seg*16 + off - 0x14`, and
+`hdr_size + seg*16 + off`), and DinoPark keys `known_funcs` by plain image
+offset, so neither ever matched. **3,574 far calls -- nearly every call a
+large-model program makes -- became 360 no-op functions**, which is the real
+reason the boot "ran cleanly" and did nothing. The lifter now takes an opt-in
+`far_base` for projects whose key space maps directly (upstream, default off so
+Civ is unchanged), and `lift_full.py` sets it to 0.
+
+That leaves far calls landing on entry points the prologue heuristic missed --
+Borland omits `push bp` for functions with no locals, so the analyzer merges them
+into whatever precedes them. Anything a far call points at is a function by
+definition, so those targets are promoted statically (90 of them) rather than
+waiting for a runtime miss. Unresolved far calls: **3,574 -> 25**.
+
+### Where it stops now
+
+The boot runs DinoPark's real init and no longer returns early -- the watchdog
+stops it. It allocates memory (`AH=48`), selects drives (`AH=0E`/`19`), checks
+file attributes (`AH=43`), and reaches console I/O (`AH=07`/`0B`/`40`) -- the
+game's disk-check startup. With convergence rounds on top it gets as far as
+`AH=3D` file opens and `INT 10h` mode sets.
+
+Open, in rough order:
+
+- **The convergence loop oscillates** once it is deep enough (round 4 hit 2,236
+  dispatches and 309 mode sets, round 5 fell back to 111 and 0). Some forced
+  target is wrong; the boundary filter needs to be stricter than "decodes as an
+  instruction".
+- **Filenames reaching `AH=3D` are garbage**, so the pointer handed to the open
+  path is wrong -- most likely a `DS`/`SS` mix-up in the caller.
+- **Runtime gaps**: `AH=40` (write), `AH=43` (file attributes), `AH=09` (print
+  string), `AH=0B`/`07` (console status/input) are all still unhandled.
+- **Switch arms.** Now that far calls resolve, the 53 `cs:[bx+table]` dispatches
+  will start being reached, and a case block cannot be lifted as a standalone
+  function -- upstream's `3412d02` does this for the 32-bit path by following the
+  table at decode time and emitting a computed goto. The 16-bit port is still
+  wanted; it is simply no longer the first thing in the way.
 
 ## The segment map
 
@@ -103,9 +125,10 @@ CS decides what its switch tables and near indirect dispatches read.
 `work/functions.json` records only flat image offsets, so `build_segmap()` in
 `tools/lift_full.py` recovers CS:
 
-1. A far `call`/`jmp` `9A/EA seg:off` states its target's CS outright — **258
-   detected functions** seeded directly, with **zero conflicts**.
-2. A near call cannot leave its segment, so both ends share one CS — flood-fill
+1. A far `call`/`jmp` `9A/EA seg:off` states its target's CS outright -- **258
+   detected functions** seeded directly, with **zero conflicts**. The MZ header's
+   entry `CS:IP` seeds image offset 0 the same way.
+2. A near call cannot leave its segment, so both ends share one CS -- flood-fill
    the seeds across near-call edges (**380/693**).
 3. Anything still unseeded takes the nearest seeded function below it (the linker
    lays segments out in order).
@@ -116,9 +139,27 @@ not fit in 16 bits cannot belong to that segment, whatever the edge says.
 Independently checked: brute-forcing CS at each `jmp word cs:[bx+disp]` site
 under the constraint that *every* table entry must land on a valid instruction
 boundary in the enclosing function solves **50 of the 53 tables**, and every
-answer agrees with the map above (`fn_15764` → `SEG_13C5`, and so on). The 3
-that do not solve are the sparse switch form — a `cmp/je/add bx,2/loop` scan
-over `{value, offset}` pairs — which needs its own table reader.
+answer agrees with the map above (`fn_15764` -> `SEG_13C5`, and so on). The 3
+that do not solve are the sparse switch form -- a `cmp/je/add bx,2/loop` scan
+over `{value, offset}` pairs -- which needs its own table reader.
+
+## The `_INIT_` table (ruled out)
+
+Worth recording, since it looked like the culprit. Borland's startup walks a
+linker-built table at `0x1ED..0x230`: 6-byte records `{flag, priority, far ptr}`
+from `ES:SI` to `ES:DI`, lowest priority first, flag 0 meaning a near call.
+Dumping it out of the relocated image shows it is **entirely correct** -- six
+records at `DGROUP:7B62`, every pointer landing in code:
+
+```
+[0] flag=00 prio=02 -> 0000:1C0F      [3] flag=00 prio=10 -> 0000:2FA6
+[1] flag=00 prio=10 -> 0000:25BB      [4] flag=00 prio=10 -> 0000:30CF
+[2] flag=01 prio=10 -> 0000:26D4      [5] flag=01 prio=1E -> 0000:6467
+```
+
+Five of the six are not detected function starts -- they are mid-function to the
+analyzer, for the no-prologue reason above -- but all six are valid instruction
+boundaries and obvious entry points.
 
 ## The runtime so far (`runtime16.c`)
 

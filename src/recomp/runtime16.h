@@ -23,10 +23,15 @@ uint8_t port_in8(CPU *cpu, uint16_t port);
 void    port_out8(CPU *cpu, uint16_t port, uint8_t val);
 
 /* address-indirect call/jmp dispatch (generated in recomp_dispatch.c) */
-void recomp_dispatch(CPU *cpu, unsigned seg, unsigned off);
+int  recomp_dispatch(CPU *cpu, unsigned seg, unsigned off);   /* 1 = dispatched */
+/* near indirect call: the lifted code pushes a dummy return word first, so a
+ * miss has to pop it back off or the callee's frame is one slot low. */
+void dispatch_near(CPU *cpu, unsigned seg, unsigned off);
 void recomp_dump_misses(const char *path);   /* in-range dispatch misses -> file */
 
 /* boot: load the image + relocations into cpu->mem and seed segment regs */
 int  dino_load_image(CPU *cpu, const char *path);
+
+void catz_div0(const char *kind);   /* divide-by-zero from lifted code */
 
 #endif

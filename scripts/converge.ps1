@@ -10,6 +10,10 @@ $vcvars = "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\
 for ($r = 1; $r -le $rounds; $r++) {
     Get-Process dino_boot -ErrorAction SilentlyContinue | Stop-Process -Force
     Start-Sleep -Milliseconds 400
+    # Delete the exe, not just the objects: the build-failed check below tests
+    # for its existence, so a stale one from a previous run reads as success and
+    # every round silently measures the same old binary.
+    Remove-Item work\dino_boot.exe -ErrorAction SilentlyContinue
     Remove-Item -Recurse -Force work\obj -ErrorAction SilentlyContinue
 
     python tools\lift_full.py *> work\lift.log

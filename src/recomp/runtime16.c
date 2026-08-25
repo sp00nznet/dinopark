@@ -109,6 +109,13 @@ static void int21(CPU *cpu) {
             }
             cpu->flags &= ~FLAG_CF; break;
         }
+        case 0x44:                                   /* IOCTL: get device info */
+            /* Borland's _setupio asks whether each standard handle is a
+             * character device, to decide which ones to line-buffer. Report
+             * 0..2 as console devices and anything else as a disk file. */
+            cpu->dx = (cpu->bx <= 2) ? 0x80D3 : 0x0002;
+            cpu->ax = cpu->dx;
+            cpu->flags &= ~FLAG_CF; break;
         case 0x4C: trace("[INT21] exit code %d\n", cpu->al); cpu->halted = 1; break;
         default: trace("[INT21] AH=%02X (unhandled)\n", ah); break;
     }
@@ -184,4 +191,15 @@ int dino_load_image(CPU *cpu, const char *path) {
     printf("loaded %ld image bytes, %u relocs; entry %04X:%04X SS:SP %04X:%04X DS=%04X(PSP)\n",
            img_sz, nrelocs, cpu->cs, cpu->ip, cpu->ss, cpu->sp, cpu->ds);
     return 0;
+}
+
+/* Divide-by-zero from lifted code. The 8086 would raise INT 0; the guest never
+ * installs a handler, so log the first few and leave the registers alone.
+ * ponytail: named catz_div0 because pcrecomp's lift16 hardcodes that name --
+ * a leak from the project it was written in. Rename upstream and here together. */
+void catz_div0(const char *kind)
+{
+    static int fired = 0;
+    if (fired++ >= 6) return;
+    fprintf(stderr, "[DIV0] guest %s by zero; registers left unchanged\n", kind);
 }

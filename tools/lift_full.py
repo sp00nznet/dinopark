@@ -55,6 +55,13 @@ def build_segmap(data, ends, decode):
                 t = s + o.disp
                 if t in ends:
                     near[s].add(t); near[t].add(s)
+    # The MZ header's entry CS:IP is a seed like any far call: DinoPark starts
+    # at 0000:0000, so the whole Borland startup region runs under CS=0. Without
+    # it nothing is seeded below the first detected function and the startup's
+    # subroutines fall through to the paragraph-of-their-own last resort, which
+    # gives the init-list walker a CS its own near calls do not share.
+    seg[ENTRY_IMG] = 0
+
     n_seed = sum(1 for s in ends if s in seg)
 
     fits = lambda fn, cs: 0 <= fn - cs * 16 < 0x10000
@@ -66,7 +73,7 @@ def build_segmap(data, ends, decode):
                 seg[b] = seg[a]; work.append(b)
     n_prop = sum(1 for s in ends if s in seg)
 
-    ks = sorted(k for k in seg if k in ends)
+    ks = sorted(k for k in seg if k in ends or k == ENTRY_IMG)
 
     def cs_of(fn):
         if fn in seg and fits(fn, seg[fn]):
@@ -135,6 +142,29 @@ def main():
             if line and int(line, 16) not in starts and valid_boundary(int(line, 16)):
                 forced_targets.add(int(line, 16))
 
+    # Direct far calls resolve at lift time, so an unresolved one silently
+    # becomes an empty stub rather than a runtime miss the convergence loop
+    # could catch. Borland omits the push bp prologue for functions with no
+    # locals, so the analyzer merges them into whatever precedes them and
+    # thousands of calls land mid-function. Anything a far call points at is a
+    # function entry by definition -- register the ones that are real
+    # instruction boundaries.
+    n_farfix = 0
+    for s in sorted(starts):
+        try:
+            insns = Decoder(data[s + HDR:det_end[s] + HDR], base_offset=s).decode_all()
+        except Exception:
+            continue
+        for ins in insns:
+            o = ins.op1
+            if ins.mnemonic in ('call', 'call far') and o and o.type == OpType.FAR:
+                t = (o.far_seg * 16 + o.disp) & 0xFFFFF
+                if t not in starts and t not in forced_targets and valid_boundary(t):
+                    forced_targets.add(t)
+                    n_farfix += 1
+    if n_farfix:
+        print(f"  far-call targets promoted to functions: {n_farfix}")
+
     funcs = [("fn_00000", 0, first_det)]                # whole startup (jmp labels)
     ct = sorted(call_tgts)
     for i, s in enumerate(ct):                          # call-target subroutines
@@ -172,7 +202,7 @@ def main():
 
     cs_of = build_segmap(data, det_end, decode)
 
-    bodies, all_calls, lifted = [], set(), 0
+    bodies, all_calls, lifted, n_wrapped = [], set(), 0, 0
     segs_used = set()
     for name, io, end in funcs:
         fstart, fend = io + HDR, end + HDR
@@ -180,8 +210,28 @@ def main():
         segs_used.add(cs)
         try:
             insns = Decoder(data[fstart:fend], base_offset=io).decode_all()
+            # A near call/jmp target is CS:(IP + rel) and the offset wraps at 16
+            # bits; the lifter resolves it as func_start + disp, which is only the
+            # same thing when it does not wrap. Every call backwards past the
+            # segment base wraps, and 707 of DinoPark's 1136 near calls landed
+            # somewhere arbitrary because of it. Rewrite disp to the wrap-correct
+            # target so the lifter's own arithmetic comes out right.
+            base = cs * 16
+            for ins in insns:
+                o = ins.op1
+                if ins.mnemonic in ('call', 'jmp') and o and o.type == OpType.REL16:
+                    t = base + ((io - base + o.disp) & 0xFFFF)
+                    if t != io + o.disp:
+                        o.disp = t - io
+                        n_wrapped += 1
             lifter = Lifter(hdr_size=HDR, known_funcs=known)
             lifter.dispatch = True       # emit real recomp_dispatch for indirect call/jmp
+            # known_funcs is keyed by image offset, and a far seg:off IS that
+            # offset here (the loader applies the MZ relocations). Without this
+            # the lifter falls back to Civ's overlay-corrected formulas, misses
+            # every time, and 3,574 far calls -- nearly every call a large-model
+            # program makes -- compile to empty stubs.
+            lifter.far_base = 0
             # cs-relative reads (switch tables, `push cs`) must use this constant:
             # cpu->cs is set once at load and goes stale across the C-call dispatch.
             lift16._CODE_SEG = f"{cs:04X}"
@@ -259,23 +309,31 @@ void recomp_dump_misses(const char *path) {
    always terminates while that data-setup work is in progress. */
 static long g_disp_budget = -1;
 /* indirect call/jmp by (seg,off): linear = seg*16+off (image space) */
-void recomp_dispatch(CPU *cpu, unsigned seg, unsigned off) {
+int recomp_dispatch(CPU *cpu, unsigned seg, unsigned off) {
     unsigned addr = ((seg << 4) + off) & 0xFFFFF;
     if (g_disp_trace < 0) g_disp_trace = getenv("DINO_TRACE") ? 1 : 0;
     if (g_disp_budget < 0) { const char *e = getenv("DINO_BUDGET"); g_disp_budget = e ? atol(e) : 200000; }
-    if (addr == 0) return;                              /* uninitialized fnptr */
-    if (--g_disp_budget <= 0) { cpu->halted = 1; return; }
-    if (g_disp_depth > 240) { if (g_disp_trace) fprintf(stderr, "[disp] depth cap\\n"); return; }
+    if (addr == 0) return 0;                            /* uninitialized fnptr */
+    if (--g_disp_budget <= 0) { cpu->halted = 1; return 0; }
+    if (g_disp_depth > 240) { if (g_disp_trace) fprintf(stderr, "[disp] depth cap\\n"); return 0; }
     static long seq = 0; long n = seq++;
     int garbage = (addr > CODE_TOP + 0x2000);   /* target beyond all code = bad ptr */
     for (int i = 0; i < N_DISP; i++)
         if (g_disp[i].addr == addr) {
             if (g_disp_trace && n < 80) fprintf(stderr, "[%03ld] ds=%04X cs=%04X -> fn_%05X\\n", n, cpu->ds, cpu->cs, addr);
-            g_disp_depth++; g_disp[i].fn(cpu); g_disp_depth--; return;
+            g_disp_depth++; g_disp[i].fn(cpu); g_disp_depth--; return 1;
         }
     note_miss(addr);
     if (g_disp_trace && (n < 80 || garbage))
         fprintf(stderr, "[%03ld] ds=%04X cs=%04X MISS %04X:%04X%s\\n", n, cpu->ds, cpu->cs, seg, off, garbage ? " <GARBAGE>" : "");
+    return 0;
+}
+
+/* A near indirect call through a bad pointer must not leave behind the dummy
+ * return word the lifted code pushed: the caller reads its own locals off
+ * that stack, so one stale slot desynchronises everything it does next. */
+void dispatch_near(CPU *cpu, unsigned seg, unsigned off) {
+    if (!recomp_dispatch(cpu, seg, off)) cpu->sp += 2;
 }
 """)
         # empty stubs for unlifted callees
@@ -284,6 +342,7 @@ void recomp_dispatch(CPU *cpu, unsigned seg, unsigned off) {
 
     print(f"Lifted {lifted}/{len(funcs)} functions -> {nchunks} chunks in {OUT}")
     print(f"  code segments: {len(segs_used)}")
+    print(f"  wrap-corrected near call/jmp targets: {n_wrapped}")
     print(f"  dispatch entries: {len(names)}  unresolved-call stubs: {len(stubs)}")
     print(f"  entry image offset: 0x{ENTRY_IMG:05X}"
           + ("  (a detected function)" if ENTRY_IMG in known else "  (NOT detected — startup stub needed)"))
