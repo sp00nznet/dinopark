@@ -333,6 +333,7 @@ def main():
                 body = body.replace(f"void {name}(", f"void {name}__body(", 1)
                 wrappers.append(f"void {name}(CPU *cpu) {{"
                                 f" uint16_t _s = cpu->sp, _b = cpu->bp;"
+                                f" recomp_push(0x{io:05X});"
                                 f" {name}__body(cpu);"
                                 f" recomp_sp_check(0x{io:05X}, _s, cpu->sp, _b, cpu->bp); }}")
             bodies.append(body)
@@ -370,6 +371,7 @@ def main():
         f.write("\n")
         if SPCHECK:
             f.write("void recomp_sp_check(unsigned addr, unsigned sp0, unsigned sp1, unsigned bp0, unsigned bp1);\n")
+            f.write("void recomp_push(unsigned addr);\n")
             for n in names:
                 f.write(f"void {n}__body(CPU *cpu);\n")
         for n in names:
@@ -458,9 +460,20 @@ void dispatch_far(CPU *cpu, unsigned seg, unsigned off) {
  * NEGATIVE delta means the function consumed stack and never gave it back,
  * which is the thing that walks SP out of its 8 KB and trips Borland's own
  * stack check. Report the first few, worst first, with a running low-water. */
+/* A live call stack, so a boot that stops making calls can still say where it
+ * stopped. recomp_sp_check pops it on the way out, so whatever is left when
+ * the watchdog fires is the chain that never returned. */
+#define MAXSTK 512
+unsigned g_stk[MAXSTK]; int g_stk_depth;
+void recomp_push(unsigned addr) {
+    if (g_stk_depth < MAXSTK) g_stk[g_stk_depth] = addr;
+    g_stk_depth++;
+}
+
 void recomp_sp_check(unsigned addr, unsigned sp0, unsigned sp1,
                      unsigned bp0, unsigned bp1) {
     static int fired = 0;
+    if (g_stk_depth > 0) g_stk_depth--;
     int delta = (int)(short)(unsigned short)(sp1 - sp0);
     int bp_bad = (bp0 != bp1);
     /* A function pops its own return frame: +2 for a near ret, +4 for retf,

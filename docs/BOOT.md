@@ -178,29 +178,78 @@ again -- so the simple rule stands.
 **`dispatch_far`.** `dispatch_near` cleaned up its 2-byte frame on a miss; the
 far path pushed 4 and cleaned up nothing. Now mirrored.
 
+### Two clocks and a heap
+
+Past the stack work the boot reached mode 13h and then went completely silent
+-- no DOS calls, no BIOS calls, no port reads. To find out where, the audit
+wrappers keep a live call stack: `recomp_push` on the way in, popped by
+`recomp_sp_check` on the way out, so whatever is still on it when the watchdog
+fires is the chain that never returned. Build with `-DDINO_SPCHECK` to print it.
+
+```
+[watchdog] live call stack, outermost first:
+    fn_00000  fn_0C6A6  fn_0F0C5  fn_06F48  fn_07C6F
+```
+
+`fn_07C6F` is a **CPU speed calibration loop**:
+
+```
+07C81  mov si, 0x46C      ; the BIOS tick count, at 0040:006C
+07C88  mov bx, [si]
+07C8A  cmp bx, [si]
+07C8C  je  07C8A          ; wait for it to change
+07C90  mov cx, 0x14       ; then count inner loops until the next tick
+```
+
+It reads the counter straight out of the BIOS data area rather than through
+INT 1Ah, so nothing in the interrupt layer can satisfy it -- the memory itself
+has to advance. A thread in `boot.c` now writes `mem[0x46C]` at 18.2 Hz.
+
+That got it to the next wait, which was the same mistake one layer down:
+
+```
+026BA  pushf / cli
+026BE  out 0x43, al       ; latch 8253 counter 0
+026C3  in  al, 0x40       ; low byte
+026CA  in  al, 0x40       ; high byte
+026CE  not bx
+```
+
+The 8253 timer, used as a high-resolution clock by taking the difference
+between two reads. Port 0x40 returned a constant, so the difference was always
+zero -- **591 million reads** in one watchdog window. Ports 0x40/0x43 are
+modelled now, counting down at 1.193182 MHz off the host's performance counter.
+
+And `AH=48` (allocate) always returned segment 0x2000 -- which is *inside the
+loaded image*, so the game was handed its own code to write over, and the
+`BX=0xFFFF` "how much is there" probe was answered as a success rather than
+with the largest free block. There is a real bump allocator now, over the gap
+between the stack top and the PSP:
+
+```
+alloc FFFF para -> 0008 (avail 50F0)     probe fails, reports the largest block
+alloc 50F0 para -> 3F10 (avail 50F0)     the game takes all 324 KB
+```
+
 ### Where it stops now
 
-`Stack overflow!` is gone -- Borland's own check no longer fires -- and the game
-runs on into its real startup:
+The boot gets its heap, reaches mode 13h, and runs on into the real game --
+far enough to start bringing up **Miles audio**, opening `MIDPAK.AD` and
+`MIDPAK.COM` successfully. The call stack at that depth is game code
+(`fn_10C86`, `fn_10AE8`, `fn_0E7F5`, `fn_19801`, ...) rather than C runtime.
 
-```
-open 'product.pf' -> ok      INT 10h set mode 03 -> 03 -> 13
-```
+It still does not draw: `work/vga_exit.bmp` is a black 320x200. Open:
 
-**It reaches mode 13h**, so the window opens. It does not draw yet: it prints
-`Error closing file` and then spins in graphics mode. Open:
-
-- **Residual frame drift.** `fn_015AD` (Borland's exit-list walker), `fn_01604`
-  (`main`), `fn_0F4FE` and `fn_196CF` still come back a few bytes out with BP
-  clobbered. Smaller than before and no longer fatal, but the last dispatches
-  before the spin are far pointers built from SS, so it is still feeding bad
-  data somewhere.
-- **`Error closing file`** comes from `fn_1972E`: `call 0000:3F37` returns
-  non-zero and the game reports it. INT 21h AH=43/57 are answered now, and
-  unhandled calls report success rather than leaving a stale carry that reads as
-  a failure -- neither was enough.
-- **The spin after mode 13h** is not the BIOS clock: INT 1Ah returns real 18.2 Hz
-  ticks now and it still spins.
+- **Frame drift comes back at depth.** SP wraps again once the boot is this
+  deep, so there is at least one more unbalanced path past the ones the audit
+  already caught. Re-run with `-DDINO_SPCHECK` and read the first violation --
+  that loop is what has been working.
+- **One open still gets a garbage filename**, so a pointer handed to the open
+  path is wrong on that route.
+- **`Error closing file`** is Borland's `fclose` returning -1: it bails when
+  `es:[bx+0x12]`, the FILE's own offset kept as a validity token, does not match
+  the pointer it was passed. The stdio struct is not being set up the way its
+  own runtime expects.
 
 ## The segment map
 

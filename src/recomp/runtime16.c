@@ -72,6 +72,18 @@ static uint8_t g_palette[256][3];
 #define VGA_BASE 0xA0000u
 #define VGA_W 320
 #define VGA_H 200
+/* DOS heap. Everything below is taken: the image runs to 0x3D0C0 and the stack
+ * sits just above it, so allocations come from the gap between the stack top
+ * and the PSP. A bump allocator is enough -- the game frees at exit, if ever. */
+#define HEAP_LO 0x3F10u
+#define HEAP_HI 0x9000u
+static uint16_t g_heap_next = HEAP_LO;
+
+/* Vectors the guest installs. Recorded so a spin waiting on an ISR-updated
+ * flag can be told apart from one that is simply looping. */
+static uint16_t g_vec_seg[256], g_vec_off[256];
+unsigned long g_port_reads[8];   /* 3DA, 3C5, 3CF, 3C9, other */
+
 static int g_vga_live;
 static uint8_t g_video_mode = 0x03;
 
@@ -96,6 +108,29 @@ void vga_snapshot(CPU *cpu, const char *path)
                   (const uint8_t *)g_palette);
 }
 
+/* 8253 timer, channel 0. The game latches it with `out 0x43, 0` and reads the
+ * counter low byte then high byte from port 0x40, and it uses the difference
+ * between two reads as a high-resolution clock -- so a constant reply is an
+ * infinite wait, which is where the boot sat spinning 591 million times. The
+ * real counter runs down at 1.193182 MHz, and that is a fast enough clock
+ * that the host's performance counter is the honest source for it. */
+static uint16_t g_pit_latch;
+static int g_pit_hi;
+
+static uint16_t pit_counter(void)
+{
+#ifdef _WIN32
+    LARGE_INTEGER f, c;
+    QueryPerformanceFrequency(&f);
+    QueryPerformanceCounter(&c);
+    unsigned long long t = (unsigned long long)
+        ((double)c.QuadPart * 1193182.0 / (double)f.QuadPart);
+#else
+    unsigned long long t = (unsigned long long)clock() * 1193182ULL / CLOCKS_PER_SEC;
+#endif
+    return (uint16_t)(0xFFFFu - (uint16_t)(t & 0xFFFFu));   /* counts down */
+}
+
 uint8_t port_in8(CPU *cpu, uint16_t port) {
     switch (port) {
         case 0x3DA: {                    /* CRT status: toggle retrace */
@@ -103,19 +138,26 @@ uint8_t port_in8(CPU *cpu, uint16_t port) {
              * place to put a frame on screen. Throttled: the poll spins far
              * faster than anything needs redrawing. */
             static uint8_t t; static unsigned n;
+            g_port_reads[0]++;
             if (g_vga_live && ((n++ & 0x3FF) == 0)) vga_flush(cpu);
             t ^= 0x09; return t;
         }
+        case 0x40:                       /* PIT counter 0, low byte then high */
+            g_pit_hi = !g_pit_hi;
+            return g_pit_hi ? (uint8_t)g_pit_latch : (uint8_t)(g_pit_latch >> 8);
         case 0x3C5: return g_map_mask;
         case 0x3CF: return 0;
         case 0x3C9: return 0x3F;
-        default: return 0xFF;
+        default: g_port_reads[1]++; return 0xFF;
     }
 }
 
 void port_out8(CPU *cpu, uint16_t port, uint8_t val) {
     (void)cpu;
     switch (port) {
+        case 0x43:                       /* PIT control: latch counter 0 */
+            if ((val & 0xC0) == 0x00) { g_pit_latch = pit_counter(); g_pit_hi = 0; }
+            break;
         case 0x3C4: g_seq_index = val; break;
         case 0x3C5: if (g_seq_index == 2) g_map_mask = val; break;
         case 0x3CE: g_gc_index = val; break;
@@ -136,15 +178,42 @@ static void int21(CPU *cpu) {
     uint8_t ah = cpu->ah;
     if (getenv("DINO_DBG")) fprintf(stderr, "[INT21] AH=%02X BX=%04X CX=%04X SS:SP=%04X:%04X BP=%04X\n", ah, cpu->bx, cpu->cx, cpu->ss, cpu->sp, cpu->bp);
     switch (ah) {
-        case 0x25: case 0x35: break;                 /* get/set int vector - ignore */
+        case 0x25:                                   /* set interrupt vector */
+            trace("[INT21] set vector %02X -> %04X:%04X\n",
+                  cpu->al, cpu->ds, cpu->dx);
+            g_vec_seg[cpu->al] = cpu->ds; g_vec_off[cpu->al] = cpu->dx;
+            break;
+        case 0x35:                                   /* get interrupt vector */
+            cpu->es = g_vec_seg[cpu->al]; cpu->bx = g_vec_off[cpu->al];
+            break;
         case 0x30: cpu->ax = 0x0005; break;          /* DOS version 5.0 */
         case 0x2C: cpu->cx = 0; cpu->dx = 0; break;  /* get time */
         case 0x2A: cpu->cx = 1993; cpu->dh = 1; cpu->dl = 1; break;  /* get date */
         case 0x19: cpu->al = 2; break;               /* current drive = C: */
         case 0x47: cpu->mem[seg_off(cpu->ds, cpu->si)] = 0; cpu->flags &= ~FLAG_CF; break; /* cwd="" */
-        case 0x48: cpu->ax = 0x2000; cpu->flags &= ~FLAG_CF; break;  /* alloc -> give a seg */
-        case 0x49: cpu->flags &= ~FLAG_CF; break;    /* free */
-        case 0x4A: cpu->flags &= ~FLAG_CF; break;    /* resize */
+        case 0x48: {                                 /* allocate paragraphs */
+            /* BX = 0xFFFF is the standard how-much-is-there probe: DOS fails
+             * it and reports the largest block in BX, and the caller asks
+             * again for that. Answering every request with one fixed segment
+             * handed the game memory inside its own image to scribble on. */
+            uint16_t want = cpu->bx;
+            uint16_t avail = (uint16_t)(HEAP_HI - g_heap_next);
+            if (want > avail) {
+                cpu->ax = 0x0008;                    /* insufficient memory */
+                cpu->bx = avail;                     /* largest block */
+                cpu->flags |= FLAG_CF;
+            } else {
+                cpu->ax = g_heap_next;
+                g_heap_next = (uint16_t)(g_heap_next + want);
+                cpu->flags &= ~FLAG_CF;
+            }
+            trace("[INT21] alloc %04X para -> %04X (avail %04X)\n",
+                  want, cpu->ax, avail);
+            break;
+        }
+        case 0x49: cpu->flags &= ~FLAG_CF; break;    /* free: bump alloc, no reuse */
+        case 0x4A:                                   /* resize the program block */
+            cpu->flags &= ~FLAG_CF; break;           /* always granted; it never moves */
         case 0x3D: {                                 /* open file */
             char name[128]; read_fname(cpu, cpu->ds, cpu->dx, name, sizeof name);
             int fh = -1; for (int i = 5; i < MAXFH; i++) if (!g_fh[i]) { fh = i; break; }

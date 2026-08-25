@@ -18,10 +18,41 @@
 /* Watchdog: the deep init still hits a busy-wait (data-setup WIP), so guarantee
  * the boot terminates. Override with DINO_WATCHDOG seconds. */
 static CPU *g_cpu;      /* for the watchdog's parting screenshot */
+/* The BIOS tick count at 0040:006C, kept moving.
+ *
+ * DinoPark calibrates itself against it -- `mov si,0x46C / mov bx,[si] /
+ * cmp bx,[si] / je $-2` waits for the tick to change, then counts how many
+ * inner loops fit in one tick. It reads the counter straight out of the BIOS
+ * data area rather than through INT 1Ah, so nothing in the interrupt layer
+ * can satisfy it: the memory itself has to advance. A torn read costs at
+ * worst one bad calibration sample. */
+static DWORD WINAPI bios_clock(LPVOID unused)
+{
+    (void)unused;
+    for (;;) {
+        if (g_cpu && g_cpu->mem) {
+            unsigned long t = vga_ticks();
+            uint8_t *p = &g_cpu->mem[0x46C];
+            p[0] = (uint8_t)t;         p[1] = (uint8_t)(t >> 8);
+            p[2] = (uint8_t)(t >> 16); p[3] = (uint8_t)(t >> 24);
+        }
+        Sleep(55);                      /* 18.2 Hz */
+    }
+}
+
 static DWORD WINAPI watchdog(LPVOID arg) {
     int secs = arg ? *(int *)arg : 8;
     Sleep((DWORD)secs * 1000);
     fprintf(stderr, "[watchdog] %ds elapsed — boot still running, exiting\n", secs);
+    { extern unsigned long g_port_reads[8];
+      fprintf(stderr, "[watchdog] retrace polls %lu, other port reads %lu\n",
+              g_port_reads[0], g_port_reads[1]); }
+#ifdef DINO_SPCHECK
+    { extern unsigned g_stk[]; extern int g_stk_depth;
+      fprintf(stderr, "[watchdog] live call stack, outermost first (%d deep):\n", g_stk_depth);
+      for (int i = 0; i < g_stk_depth && i < 40; i++)
+          fprintf(stderr, "    fn_%05X\n", g_stk[i]); }
+#endif
     fflush(stderr);
     if (g_cpu) vga_snapshot(g_cpu, "work/vga_exit.bmp");
     recomp_dump_misses("work/dino_misses.txt");
@@ -43,6 +74,7 @@ int main(int argc, char **argv) {
 #ifdef _WIN32
     static int wd_secs; { const char *e = getenv("DINO_WATCHDOG"); wd_secs = e ? atoi(e) : 8; }
     CreateThread(NULL, 0, watchdog, &wd_secs, 0, NULL);
+    CreateThread(NULL, 0, bios_clock, NULL, 0, NULL);
 #endif
 
     /* enter the lifted Borland startup at image offset 0 */
