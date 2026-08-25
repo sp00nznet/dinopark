@@ -27,6 +27,7 @@ int  recomp_dispatch(CPU *cpu, unsigned seg, unsigned off);   /* 1 = dispatched 
 /* near indirect call: the lifted code pushes a dummy return word first, so a
  * miss has to pop it back off or the callee's frame is one slot low. */
 void dispatch_near(CPU *cpu, unsigned seg, unsigned off);
+void dispatch_far(CPU *cpu, unsigned seg, unsigned off);   /* 4-byte frame */
 void recomp_dump_misses(const char *path);   /* in-range dispatch misses -> file */
 
 /* boot: load the image + relocations into cpu->mem and seed segment regs */
@@ -35,6 +36,7 @@ int  dino_load_image(CPU *cpu, const char *path);
 void catz_div0(const char *kind);   /* divide-by-zero from lifted code */
 
 /* present mem[0xA0000] in the window / to a BMP */
+unsigned long vga_ticks(void);   /* BIOS 18.2 Hz tick count */
 void vga_flush(CPU *cpu);
 void vga_snapshot(CPU *cpu, const char *path);
 

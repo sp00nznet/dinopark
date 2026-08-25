@@ -24,7 +24,66 @@ HDR = 0x4800
 EXE = os.path.join(ROOT, "original", "DINOPARK.EXE")
 OUT = os.path.join(ROOT, "src", "recomp", "gen")
 CHUNK = 60
+SPCHECK = os.environ.get("DINO_SPCHECK") == "1"   # wrap each fn to audit its SP delta
 ENTRY_IMG = 0x0000                 # CS:IP = 0000:0000 -> image offset 0
+
+
+def jump_tables(data, insns, cs, offs):
+    """Arms of each `jmp word cs:[bx+table]` -- a Borland switch.
+
+    The table is a run of near offsets sitting in the code segment, and
+    nothing names the arms but this one instruction. The preceding
+    `cmp bx, N` / `jbe` bounds it; failing that, take entries while they
+    still land on an instruction boundary inside this function.
+
+    Returns {jmp instruction address: [absolute arm addresses]}.
+    """
+    out = {}
+    base = cs * 16
+    for idx, ins in enumerate(insns):
+        o = ins.op1
+        if ins.mnemonic != 'jmp' or not o or o.type != OpType.MEM:
+            continue
+        if o.base != 'bx' or o.seg != 'cs':
+            continue
+        # Two shapes, both ending in `jmp word cs:[bx+disp]`.
+        #
+        # Dense -- bx is the case index, doubled, and disp is the table:
+        #     cmp bx, N / jbe / jmp default / shl bx, 1 / jmp cs:[bx+table]
+        #
+        # Sparse -- bx walks a list of case VALUES and the arm offsets sit
+        # immediately after them, so disp is exactly the value list's length:
+        #     mov cx, N / mov bx, values / mov ax, cs:[bx] / cmp / je hit
+        #     add bx, 2 / loop / jmp default
+        #   hit: jmp cs:[bx + N*2]
+        bound = bx_imm = cx_imm = None
+        for j in insns[max(0, idx - 10):idx]:
+            if not (j.op1 and j.op1.type == OpType.REG16 and j.op2
+                    and j.op2.type in (OpType.IMM8, OpType.IMM16)):
+                continue
+            reg = repr(j.op1)
+            if j.mnemonic == 'cmp':
+                bound = j.op2.disp + 1
+            elif j.mnemonic == 'mov' and reg == 'bx':
+                bx_imm = j.op2.disp
+            elif j.mnemonic == 'mov' and reg == 'cx':
+                cx_imm = j.op2.disp
+        if bx_imm is not None and cx_imm and o.disp == cx_imm * 2:
+            bound, start = cx_imm, base + bx_imm + o.disp
+        else:
+            start = base + o.disp
+        arms, tbl = [], start
+        for k in range(bound if bound else 256):
+            a = tbl + k * 2 + HDR
+            if a + 2 > len(data):
+                break
+            t = base + int.from_bytes(data[a:a + 2], 'little')
+            if t not in offs:
+                break
+            arms.append(t)
+        if arms and (bound is None or len(arms) == bound):
+            out[ins.address] = arms
+    return out
 
 
 def build_segmap(data, ends, decode):
@@ -120,8 +179,17 @@ def main():
     import bisect as _bi
 
     def valid_boundary(t):
-        """t is a real instruction start inside its containing detected function
-        (filters garbage in-range pointers that aren't entry points)."""
+        """t is a real entry point: either a decodable instruction boundary
+        inside its containing detected function, or a Borland prologue.
+
+        The boundary test alone is not enough. A function that embeds data --
+        a sparse switch table of {value, offset} pairs, say -- desynchronises
+        the linear decode that walks through it, so real entries past the table
+        do not line up. `push bp; mov bp, sp` is what the compiler emits and is
+        proof enough on its own.
+        """
+        if data[t + HDR:t + HDR + 3] == b'\x55\x8b\xec':
+            return True
         i = _bi.bisect_right(detlist, t) - 1
         if i < 0:
             return False
@@ -213,6 +281,8 @@ def main():
     os.makedirs(OUT, exist_ok=True)
     bodies, all_calls, lifted, n_wrapped = [], set(), 0, 0
     segs_used = set()
+    wrappers = []
+    n_arms = 0
     for name, io, end in funcs:
         fstart, fend = io + HDR, end + HDR
         cs = cs_of(io)
@@ -244,10 +314,28 @@ def main():
             # cs-relative reads (switch tables, `push cs`) must use this constant:
             # cpu->cs is set once at load and goes stale across the C-call dispatch.
             lift16._CODE_SEG = f"{cs:04X}"
+            # Switch arms belong to THIS function, not to themselves: they are
+            # its loop body, and dispatching one as a standalone function
+            # returns from the enclosing C function with its epilogue never
+            # run -- SP is left un-restored and the caller's BP takes a
+            # call-frame sentinel.
+            lifter.jump_tables = jump_tables(
+                data, insns, cs, {x.offset for x in insns})
+            n_arms += sum(len(v) for v in lifter.jump_tables.values())
             body = lifter.lift_function(name, insns, io, is_far=True)
             # keep the live cpu->cs honest too -- traces and the runtime read it.
-            bodies.append(body.replace("(CPU *cpu)\n{",
-                                       f"(CPU *cpu)\n{{\n    cpu->cs = SEG_{cs:04X};", 1))
+            body = body.replace("(CPU *cpu)" + chr(10) + "{",
+                                f"(CPU *cpu)" + chr(10) + "{" + chr(10) + f"    cpu->cs = SEG_{cs:04X};", 1)
+            if SPCHECK:
+                # Rename the body and call it through a wrapper that records
+                # SP either side. A function that returns must net-POP its
+                # return frame, so a negative delta is a function eating stack.
+                body = body.replace(f"void {name}(", f"void {name}__body(", 1)
+                wrappers.append(f"void {name}(CPU *cpu) {{"
+                                f" uint16_t _s = cpu->sp, _b = cpu->bp;"
+                                f" {name}__body(cpu);"
+                                f" recomp_sp_check(0x{io:05X}, _s, cpu->sp, _b, cpu->bp); }}")
+            bodies.append(body)
             all_calls |= lifter.func_calls
             lifted += 1
         except Exception as e:
@@ -269,12 +357,21 @@ def main():
             f.write("\n\n".join(bodies[i:i + CHUNK]) + "\n")
         nchunks += 1
 
+    if SPCHECK:
+        with open(os.path.join(OUT, "recomp_wrap.c"), "w") as f:
+            f.write(chr(35) + 'include "recomp_all.h"\n\n')
+            f.write(chr(10).join(wrappers) + chr(10))
+
     with open(os.path.join(OUT, "recomp_all.h"), "w") as f:
         f.write("#ifndef RECOMP_ALL_H\n#define RECOMP_ALL_H\n")
         f.write('#include "../cpu.h"\n#include "../runtime16.h"\n\n')
         for sg in sorted(segs_used):
             f.write(f"#define SEG_{sg:04X} 0x{sg:04X}\n")
         f.write("\n")
+        if SPCHECK:
+            f.write("void recomp_sp_check(unsigned addr, unsigned sp0, unsigned sp1, unsigned bp0, unsigned bp1);\n")
+            for n in names:
+                f.write(f"void {n}__body(CPU *cpu);\n")
         for n in names:
             f.write(f"void {n}(CPU *cpu);\n")
         f.write("\n#endif\n")
@@ -344,14 +441,55 @@ int recomp_dispatch(CPU *cpu, unsigned seg, unsigned off) {
 void dispatch_near(CPU *cpu, unsigned seg, unsigned off) {
     if (!recomp_dispatch(cpu, seg, off)) cpu->sp += 2;
 }
+
+/* Same for an indirect FAR call: the site pushed CS and a return word, so a
+ * miss has to drop four bytes rather than two. Without it every call through
+ * an unresolved far pointer walks SP down by 4 and the caller's `pop bp`
+ * comes back with somebody else's data. */
+void dispatch_far(CPU *cpu, unsigned seg, unsigned off) {
+    if (!recomp_dispatch(cpu, seg, off)) cpu->sp += 4;
+}
 """)
-        # empty stubs for unlifted callees
+        if SPCHECK:
+            f.write("""
+/* SP audit. A lifted function is entered with its return frame already on the
+ * guest stack and must leave having popped it, so the net delta is +2 (near
+ * ret), +4 (retf), or those plus the bytes a `ret N` pops for its caller. A
+ * NEGATIVE delta means the function consumed stack and never gave it back,
+ * which is the thing that walks SP out of its 8 KB and trips Borland's own
+ * stack check. Report the first few, worst first, with a running low-water. */
+void recomp_sp_check(unsigned addr, unsigned sp0, unsigned sp1,
+                     unsigned bp0, unsigned bp1) {
+    static int fired = 0;
+    int delta = (int)(short)(unsigned short)(sp1 - sp0);
+    int bp_bad = (bp0 != bp1);
+    /* A function pops its own return frame: +2 for a near ret, +4 for retf,
+     * plus whatever a `ret N` clears for its caller. Anything under +2 means
+     * it consumed stack that was not its own. */
+    if (!bp_bad && delta >= 2 && delta <= 256) return;
+    if (fired++ >= 25) return;
+    fprintf(stderr, "[sp] fn_%05X  SP %04X->%04X (%+d)  BP %04X->%04X%s\\n",
+            addr, sp0, sp1, delta, bp0, bp1, bp_bad ? "  <-- BP CLOBBERED" : "");
+}
+""")
+
+        # Stubs for call targets we could not resolve. They cannot do the work,
+        # but they must still pop the return frame the call site pushed, or
+        # every call through one loses 2 or 4 bytes of stack and the caller's
+        # `pop bp` then reads the wrong slot.
         for s in stubs:
-            f.write(f"void {s}(CPU *cpu) {{ (void)cpu; }}\n")
+            # Pop what the call site pushed: a far call put CS and a return
+            # word on the stack, a near one just the word. Deciding instead by
+            # decoding the target and matching its ret/retf measured WORSE --
+            # it over-pops the `push cs; call near` sites and Borland's stack
+            # check starts firing again. Keep the simple rule.
+            pop = 4 if s.startswith("far_") else 2
+            f.write(f"void {s}(CPU *cpu) {{ cpu->sp += {pop}; }}   /* unresolved: keeps the stack balanced */\n")
 
     print(f"Lifted {lifted}/{len(funcs)} functions -> {nchunks} chunks in {OUT}")
     print(f"  code segments: {len(segs_used)}")
     print(f"  wrap-corrected near call/jmp targets: {n_wrapped}")
+    print(f"  switch arms lifted inline: {n_arms}")
     print(f"  dispatch entries: {len(names)}  unresolved-call stubs: {len(stubs)}")
     print(f"  entry image offset: 0x{ENTRY_IMG:05X}"
           + ("  (a detected function)" if ENTRY_IMG in known else "  (NOT detected — startup stub needed)"))

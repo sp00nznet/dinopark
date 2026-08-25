@@ -11,6 +11,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <time.h>
+#endif
 
 #define LOADSEG  0x0000   /* image loaded so seg:off matches lift (image space) */
 #define HDR_SIZE 0x4800
@@ -69,6 +74,15 @@ static uint8_t g_palette[256][3];
 #define VGA_H 200
 static int g_vga_live;
 static uint8_t g_video_mode = 0x03;
+
+unsigned long vga_ticks(void)
+{
+#ifdef _WIN32
+    return (unsigned long)((GetTickCount64() * 1193ULL) / 65536ULL);
+#else
+    return (unsigned long)(clock() / (CLOCKS_PER_SEC / 18));
+#endif
+}
 
 void vga_flush(CPU *cpu)
 {
@@ -184,8 +198,21 @@ static void int21(CPU *cpu) {
             cpu->dx = (cpu->bx <= 2) ? 0x80D3 : 0x0002;
             cpu->ax = cpu->dx;
             cpu->flags &= ~FLAG_CF; break;
+        case 0x43:                                   /* get/set file attributes */
+            if (cpu->al == 0) cpu->cx = 0x20;        /* archive */
+            cpu->flags &= ~FLAG_CF; break;
+        case 0x57:                                   /* get/set file date+time */
+            if (cpu->al == 0) { cpu->cx = 0x6000; cpu->dx = 0x1A61; }  /* 1993-03-01 */
+            cpu->flags &= ~FLAG_CF; break;
         case 0x4C: trace("[INT21] exit code %d\n", cpu->al); cpu->halted = 1; break;
-        default: trace("[INT21] AH=%02X (unhandled)\n", ah); break;
+        default:
+            /* Report success. DOS returns errors in CF, and leaving it as we
+             * found it means a stale carry from some earlier call reads as a
+             * failure the game then reports -- which is how a working open
+             * turned into `Error closing file`. */
+            trace("[INT21] AH=%02X (unhandled, reporting success)\n", ah);
+            cpu->flags &= ~FLAG_CF;
+            break;
     }
 }
 
@@ -235,7 +262,16 @@ void int_handler(CPU *cpu, int vec) {
         case 0x16: cpu->ax = 0; cpu->flags |= FLAG_ZF; break;  /* keyboard: no key */
         case 0x33: cpu->ax = 0; break;                          /* mouse: absent */
         case 0x66: break;                                       /* Miles AIL: stub */
-        case 0x1A: cpu->cx = 0; cpu->dx = 0; break;             /* timer ticks */
+        case 0x1A: {                                /* BIOS tick count */
+            /* A frozen clock is an infinite wait: every `spin until ticks >=
+             * start + n` loop in the game never finishes. Derive real ticks
+             * from the host at the PC's 18.2 Hz. */
+            unsigned long t = vga_ticks();
+            cpu->cx = (uint16_t)(t >> 16);
+            cpu->dx = (uint16_t)t;
+            cpu->al = 0;                            /* no midnight rollover */
+            break;
+        }
         case 0x03: cpu->halted = 1; break;                      /* breakpoint -> stop */
         default: trace("[INT %02X] AH=%02X (unhandled)\n", vec, cpu->ah); break;
     }

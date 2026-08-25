@@ -125,29 +125,82 @@ It was refusing on its own terms, and we were not listening. Implementing INT
 With both fixed the game opens `PRODUCT.PF` and **sets mode 13h**. The window
 opens. It has not drawn anything yet.
 
+### The stack: found by measuring, not by guessing
+
+Three theories about `Stack overflow!` were wrong before one measurement
+settled it. `DINO_SPCHECK=1 python tools/lift_full.py` wraps every lifted
+function:
+
+```c
+void fn_196CF(CPU *cpu) { uint16_t _s = cpu->sp, _b = cpu->bp;
+                          fn_196CF__body(cpu);
+                          recomp_sp_check(0x196CF, _s, cpu->sp, _b, cpu->bp); }
+```
+
+A function is entered with its return frame already on the guest stack and must
+leave having popped it, so the net delta is +2 (near `ret`), +4 (`retf`), or
+those plus a `ret N`. Anything less means it ate stack that was not its own, and
+BP must come back unchanged. One run named every offender in order. Four
+distinct bugs came out of it:
+
+**Switch arms were being dispatched instead of jumped to.** `fn_01DBD` lost 158
+bytes per call. Its indirect jmp compiled to `recomp_dispatch(...); return;`,
+which returns from the C function -- so `mov sp, bp / pop bp / retf` never ran,
+and the caller's `pop bp` then read a call-frame sentinel. This is upstream's
+`3412d02` (32-bit) ported to the 16-bit path: follow the table at decode time,
+make the arms block leaders of the switching function, and emit a branch on the
+target address -- `goto` inside this function, dispatch only for the rest.
+
+DinoPark uses both Borland shapes, and both are recovered (439 arms):
+
+```
+dense    cmp bx, N / jbe / jmp default / shl bx, 1 / jmp cs:[bx+table]
+sparse   mov cx, N / mov bx, values / mov ax, cs:[bx] / cmp / je hit
+         add bx, 2 / loop / jmp default
+    hit: jmp cs:[bx + N*2]        <- offsets sit right after the values
+```
+
+**Entries hidden behind embedded data.** `fn_05988` is an obvious function --
+`push bp; mov bp, sp; sub sp, 0x58` -- but promotion rejected it, because the
+containing function embeds a sparse switch's value table and the linear decode
+walking through that data comes out misaligned. `valid_boundary` now also
+accepts a Borland prologue on its own evidence. Unresolved stubs: 34 -> 15.
+
+**Stubs that swallowed the frame.** An unresolved call target became
+`void res_005988(CPU *cpu) { (void)cpu; }`, and the call site had pushed 2 or 4
+bytes for it to pop. Every call through one walked SP down. They pop now.
+
+Popping by the *call site* (4 for `far_`, 2 for `res_`) is what works. Deciding
+instead by decoding the target and matching its `ret`/`retf` measured **worse**
+-- it over-pops the `push cs; call near` sites and the stack check starts firing
+again -- so the simple rule stands.
+
+**`dispatch_far`.** `dispatch_near` cleaned up its 2-byte frame on a miss; the
+far path pushed 4 and cleaned up nothing. Now mirrored.
+
 ### Where it stops now
 
-`Stack overflow!` -- Borland's own runtime check, firing before the first draw.
-SP is not draining gradually, it is being corrupted: it lands at values well
-outside the 8 KB stack (`_stklen` = 0x2000, checked against the image, and the
-stack sits directly above DGROUP where it should).
+`Stack overflow!` is gone -- Borland's own check no longer fires -- and the game
+runs on into its real startup:
 
-Ruled out so far:
+```
+open 'product.pf' -> ok      INT 10h set mode 03 -> 03 -> 13
+```
 
-- **Not far-call/near-ret mismatch.** All 2,300 far call sites reach functions
-  that end in `retf`; no site reaches a near-`ret` one.
-- **Not the `push cs; call near` idiom** (895 of 1136 near calls), which looked
-  like a missing return word: `lift16` already pushes the sentinel, so `push cs`
-  plus that sentinel makes a complete far frame for the callee's `retf`.
-- **Not runaway recursion.** 92 dispatches in a whole boot, and the depth cap
-  never fires.
+**It reaches mode 13h**, so the window opens. It does not draw yet: it prints
+`Error closing file` and then spins in graphics mode. Open:
 
-The live suspect is the `retf`-as-trampoline path: `retf` pops CS:IP and hands
-them to `recomp_dispatch`, which calls the target **without pushing a frame of
-its own**. When that target ends in its own `retf` it pops four bytes belonging
-to somebody else. The trace shows exactly that shape -- dispatches to
-`0000:3D04` (that is SS) and `7B62:3020` (the `_INIT_` offset and DGROUP, i.e.
-somebody's pushed `si`/`ds` read back as a return address).
+- **Residual frame drift.** `fn_015AD` (Borland's exit-list walker), `fn_01604`
+  (`main`), `fn_0F4FE` and `fn_196CF` still come back a few bytes out with BP
+  clobbered. Smaller than before and no longer fatal, but the last dispatches
+  before the spin are far pointers built from SS, so it is still feeding bad
+  data somewhere.
+- **`Error closing file`** comes from `fn_1972E`: `call 0000:3F37` returns
+  non-zero and the game reports it. INT 21h AH=43/57 are answered now, and
+  unhandled calls report success rather than leaving a stale carry that reads as
+  a failure -- neither was enough.
+- **The spin after mode 13h** is not the BIOS clock: INT 1Ah returns real 18.2 Hz
+  ticks now and it still spins.
 
 ## The segment map
 
