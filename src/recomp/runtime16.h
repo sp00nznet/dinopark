@@ -43,7 +43,9 @@ void fb_scan(CPU *cpu, const char *path);   /* find an offscreen framebuffer */
 void heap_dump(CPU *cpu);        /* the game's own heap chain */
 void heap_trace_dump(void);      /* the walk the game actually performed */
 void hdr_write_dump(void);       /* the chain the game believes it built */
+void chain_break_dump(void);     /* the write that left the chain broken */
 void find_signature(CPU *cpu, const char *sig);   /* locate a loaded asset */
+void find_block_size(CPU *cpu, uint16_t want);   /* locate a header by size */
 void text_snapshot(CPU *cpu);    /* dump the 80x25 text screen */
 void stack_message_scan(CPU *cpu);   /* strings left on the guest stack */
 

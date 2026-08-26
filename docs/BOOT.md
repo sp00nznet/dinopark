@@ -477,11 +477,50 @@ the file is not loaded at `0x6C47` at all -- the only `"UNC2"` signatures in
 memory are the constant in DGROUP and a copy of the header in a **stack** local
 at `0x3EF70`.
 
-The open question is narrow and factual: why do the allocations past `0x6C26`
-not create block headers? Most likely a second allocation path -- a high-water
-or handle-based one -- that the chain walker does not know about, or one that
-returns memory without recording it. Watching writes to the handle table at
-`ds:[0x7424]` is the next observation.
+### The compactor breaks the chain it is walking
+
+`chain_check()` verifies the invariant -- walking from `ds:[742A]` by size must
+land exactly on `ds:[742E]` -- after every write to a block size field. The
+chain is *legitimately* inconsistent while the manager edits it: a 16-bit store
+arrives as two byte writes, and headers are cleared before they are filled. So
+the first break means nothing. What matters is the last write after which it
+never became consistent again, and that is what the runtime reports:
+
+```
+[chain] last write leaving it broken: 6C263 = 00; walk stops at 6C47
+        (first=400B last=9000)
+[chain]     fn_00000 fn_0C6A6 fn_0CDDB fn_0D885 fn_2F0C3 fn_2F0CD
+```
+
+`6C263` is the high byte of block `6C26`'s size, completing `0x0021`. And
+`fn_2F0CD` is **the compactor** -- the same routine that then hangs walking the
+chain. It breaks its own bookkeeping and immediately spins on the result.
+
+The relevant code is its move-and-merge path:
+
+```
+2F112  mov dx, word es:[0x2]      current block's size
+2F11F  mov cx, word ds:[0x2]      next block's size
+2F138  call 0x091F                memmove the next block down over this one
+2F13F  inc si                     data pointer = block + 1 paragraph
+2F14A  mov word es:[di+0x2], si   update the handle to point at it
+2F153  add ax, word es:[0x2]      where the new free block goes
+2F15F  mov word es:[0x2], dx      ...and its size
+2F18F  add word es:[0x2], ax      elsewhere: merge with the following free block
+```
+
+Whether the defect is in our lift of that arithmetic or in the state it is
+handed is the next question, and it is now a small one: the routine is 450 bytes
+and the exact store that goes wrong is identified.
+
+Diagnostics available for it, all opt-in and all observational:
+
+| switch | what it reports |
+|---|---|
+| `DINO_HEAPTRACE=1` | the block sequence walked, and writes to size fields |
+| `DINO_WATCH=<hex>` | the first eight writes to one linear address, with the call stack for the first |
+| `-DDINO_SPCHECK` | per-function SP/BP audit and a live call stack |
+| `heap_dump` / `find_signature` / `find_block_size` | chain snapshot, locate a loaded asset, locate a header by size |
 
 ## The segment map
 

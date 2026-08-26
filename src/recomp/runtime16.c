@@ -147,13 +147,15 @@ static void watch_note(uint32_t addr, uint8_t val)
         const char *e = getenv("DINO_WATCH");
         if (e) g_watch = (uint32_t)strtoul(e, NULL, 16);
     }
-    if (addr != g_watch || g_watch_fired) return;
-    g_watch_fired = 1;
-    fprintf(stderr, "[watch] %05X written with %02X\n", addr, val);
+    if (addr != g_watch || g_watch_fired >= 8) return;
+    g_watch_fired++;
+    fprintf(stderr, "[watch] %05X write #%d = %02X\n", addr, g_watch_fired, val);
 #ifdef DINO_SPCHECK
-    { extern unsigned g_stk[]; extern int g_stk_depth;
-      for (int i = 0; i < g_stk_depth && i < 40; i++)
-          fprintf(stderr, "[watch]     fn_%05X\n", g_stk[i]); }
+    if (g_watch_fired == 1) {
+        extern unsigned g_stk[]; extern int g_stk_depth;
+        for (int i = 0; i < g_stk_depth && i < 40; i++)
+            fprintf(stderr, "[watch]     fn_%05X\n", g_stk[i]);
+    }
 #endif
 }
 
@@ -164,6 +166,65 @@ static void watch_note(uint32_t addr, uint8_t val)
 #define HWR 48
 static struct { uint16_t seg; uint8_t val; } g_hwr[HWR];
 static unsigned g_hwr_n;
+
+/* The chain invariant: walking from ds:[742A] by size must land exactly on
+ * ds:[742E]. Check it after every write to a size field and report the first
+ * write that breaks it -- with the call stack, which names the routine. Cheap,
+ * the chain being a couple of dozen blocks, and it answers the question
+ * directly rather than inferring it from a snapshot taken long afterwards. */
+/* The chain is legitimately inconsistent *while* the manager edits it -- a
+ * 16-bit store arrives as two bytes, and headers get cleared before being
+ * filled. So the first break means nothing; the one that matters is the last
+ * write after which it never became consistent again. Record that, with the
+ * call stack as it stood, and report it at exit. */
+static uint32_t g_break_addr; static uint8_t g_break_val;
+static uint16_t g_break_stop, g_break_first, g_break_last;
+static unsigned g_break_stk[40]; static int g_break_depth; static int g_break_seen;
+
+static void chain_check(CPU *cpu, uint32_t addr, uint8_t val)
+{
+    if (g_heaptrace <= 0 || !g_dgroup) return;
+    /* Only after a write to a block's size field, and never while the heap's
+     * own control words are being stored: a 16-bit store arrives here as two
+     * byte writes, and checking between them reads a half-updated pointer. */
+    if ((addr & 0xF) != 2 && (addr & 0xF) != 3) return;
+    if (addr < (uint32_t)HEAP_LO * 16 || addr >= (uint32_t)HEAP_HI * 16) return;
+    uint16_t first = mem_read16(cpu, g_dgroup, 0x742A);
+    uint16_t last  = mem_read16(cpu, g_dgroup, 0x742E);
+    if (!first || !last || first == last) return;
+
+    uint16_t seg = first;
+    for (int n = 0; n < 4096; n++) {
+        if (seg == last) return;                       /* still consistent */
+        if (seg < HEAP_LO || seg >= HEAP_HI) break;
+        uint16_t size = mem_read16(cpu, seg, 2);
+        if (!size) break;
+        uint16_t next = (uint16_t)(seg + size);
+        if (next <= seg) break;                        /* wrapped */
+        seg = next;
+    }
+
+    g_break_seen = 1;
+    g_break_addr = addr; g_break_val = val; g_break_stop = seg;
+    g_break_first = first; g_break_last = last;
+#ifdef DINO_SPCHECK
+    { extern unsigned g_stk[]; extern int g_stk_depth;
+      g_break_depth = g_stk_depth < 40 ? g_stk_depth : 40;
+      for (int i = 0; i < g_break_depth; i++) g_break_stk[i] = g_stk[i]; }
+#endif
+}
+
+void chain_break_dump(void)
+{
+    if (!g_break_seen) {
+        fprintf(stderr, "[chain] the block chain was consistent throughout\n");
+        return;
+    }
+    fprintf(stderr, "[chain] last write leaving it broken: %05X = %02X; walk stops at %04X (first=%04X last=%04X)\n",
+            g_break_addr, g_break_val, g_break_stop, g_break_first, g_break_last);
+    for (int i = 0; i < g_break_depth; i++)
+        fprintf(stderr, "[chain]     fn_%05X\n", g_break_stk[i]);
+}
 
 static void hdr_write_note(uint32_t addr, uint8_t val)
 {
@@ -199,6 +260,7 @@ int recomp_mem_write8(CPU *cpu, uint32_t addr, uint8_t val)
 {
     watch_note(addr, val);
     hdr_write_note(addr, val);
+    chain_check(cpu, addr, val);
     f5_note(addr, val);
     if (addr < VGA_LOW || addr >= VGA_HIGH || g_chain4) return 0;
     uint32_t off = addr - VGA_LOW;
@@ -210,6 +272,26 @@ int recomp_mem_write8(CPU *cpu, uint32_t addr, uint8_t val)
 /* Where did an asset actually land? The container signature is the anchor:
  * finding it says where the loader's buffer really starts, which is the one
  * thing the block chain cannot tell us once it has walked into the data. */
+/* Look for a block header carrying a particular size, anywhere in the heap.
+ * If a split shrank a block but its remainder header never appeared where the
+ * chain expects it, this says whether the header was written somewhere else
+ * (a wrong ES) or never written at all. */
+void find_block_size(CPU *cpu, uint16_t want)
+{
+    unsigned hits = 0;
+    for (uint32_t seg = HEAP_LO; seg < HEAP_HI && hits < 8; seg++) {
+        uint32_t a = (uint32_t)seg * 16;
+        uint16_t size = (uint16_t)(cpu->mem[a + 2] | (cpu->mem[a + 3] << 8));
+        if (size != want) continue;
+        hits++;
+        fprintf(stderr, "[blk] size %04X at segment %04X (prev=%04X flags=%02X)\n",
+                want, (unsigned)seg,
+                (unsigned)(cpu->mem[a] | (cpu->mem[a + 1] << 8)), cpu->mem[a + 8]);
+    }
+    if (!hits)
+        fprintf(stderr, "[blk] no block anywhere in the heap has size %04X\n", want);
+}
+
 void find_signature(CPU *cpu, const char *sig)
 {
     size_t n = strlen(sig), hits = 0;
