@@ -312,31 +312,55 @@ own directory ran on into whatever followed. That is where the stray `=` in
 `=dino.cfg` came from. The block is built properly now, with real variables, the
 double NUL, the count word, and a terminated path.
 
+### Miles, stubbed at the seam civ picked
+
+The game binds Miles through 25 tiny thunks -- `mov ax, FN / int 66h / retf` --
+at image `0x2B5` onward, using AIL functions `0x0689..0x069A` (digital) and
+`0x0701..0x0710` (MIDI). INT 66h was a silent no-op, which leaves AX holding the
+function number. That is not harmless: `fn_09035` polls AIL `0x689` ("is
+anything still playing?") until it answers **zero**, so a non-zero reply spins
+forever. Nothing is ever playing without a driver, so INT 66h answers zero.
+
+The drivers themselves cannot be run at all. `SBPRO.COM`, `MIDPAK.COM` and the
+`.ADV` files are separate 16-bit binaries the game loads into memory and jumps
+into; the dispatch goes to addresses like `603E:0200` and misses. Both loaders
+(`fn_00419` for AIL, `fn_005E0` for MIDPAK) return a handle that the caller only
+tests against zero, and on zero it prints `Unable to load ...` and quits -- so
+both are overridden to report success. The game then runs silently. civ made the
+same call about its graphics driver, which it could not init headless either.
+
 ### Where it stops now
 
-The boot reads its configuration and reaches graphics in the real flow:
+DinoPark reads its configuration, brings up (stubbed) sound, and gets into its
+own asset loading:
 
 ```
-open 'product.pf' -> ok      open 'dino.cfg' -> ok
+open 'product.pf' -> ok    open 'dino.cfg' -> ok
 INT 10h set mode 13
-open 'SBPFM.ADV' -> ok       open 'MIDPAK.AD' -> ok      open 'MIDPAK.COM' -> ok
+open 'SBPFM.ADV'  -> ok    open 'MIDPAK.AD' -> ok
+open 'font.pic'   -> ok    open 'font.pic'  -> ok
+open 'vars.dat'   -> ok    open 'btns.act'  -> ok
 ```
 
-It no longer exits -- the watchdog is what stops it -- and it is bringing up the
-full Miles audio stack. It has not drawn yet: `work/vga_exit.bmp` is still black.
+Its font, its variables and its button sprites. It does not exit -- the watchdog
+stops it -- but it settles into a loop after `btns.act` and opens nothing more.
 
-Open:
+**It still has not drawn.** Two things are known about why:
 
-- **The loaded drivers cannot be called.** `SBPRO.COM`, `MIDPAK.COM` and friends
-  are separate 16-bit binaries the game loads and jumps into; the dispatch goes
-  to addresses like `603E:0200` and `650E:0200` and misses. `fn_00419` reports
-  success so the game continues, but everything downstream of a real driver is
-  absent. Stubbing Miles at the AIL entry points is the honest fix.
-- **`fn_0CCD7`** returns with SP 31352 bytes high under `-DDINO_SPCHECK`. It is
-  another of the switch functions, and it is the next thing the audit names.
-- The audit build and the plain build diverge here -- the plain one runs on, the
-  audit one trips the stack check -- so trust the plain build for behaviour and
-  the audit only for naming the function.
+- **The DAC is never programmed.** `fb_scan` reports `DAC palette still all
+  zero`, so every index maps to black regardless of what is in memory.
+- **DinoPark runs Mode X, not plain 13h.** `fn_09054` sets mode 13h and then
+  unchains it -- `3C4/4` clears chain-4, `3CE/5` and `3CE/6` clear, map mask to
+  `0x0F`, then `rep stosw` over 64 KB of `A000` and CRTC `0x14`/`0x17` fixups.
+  In unchained mode each byte address covers four pixels, one per plane, chosen
+  by the Map Mask -- so the flat `mem[0xA0000]` model collapses all four planes
+  onto the same byte. Plane-aware writes are needed before anything on that
+  screen will be right.
+
+`fb_scan()` hunts for an offscreen framebuffer the way civ found its own --
+scoring 320x200 windows for picture-like statistics and dumping the best as BMP,
+raw indices and palette. Right now its best candidate is loaded asset data
+rather than a screen, which fits: the game has not composed a frame yet.
 
 ## The segment map
 

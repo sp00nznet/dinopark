@@ -146,6 +146,54 @@ void text_snapshot(CPU *cpu)
     fprintf(stderr, "---------------------\n");
 }
 
+/* Hunt for an offscreen framebuffer.
+ *
+ * A DOS game of this era usually draws into a RAM buffer and blits it to the
+ * card at frame end, so an empty A000 does not mean nothing was drawn -- civ
+ * had exactly this, and finding its offscreen buffer is what finally made its
+ * title screen visible. Score every 320x200-sized window by how much it looks
+ * like a picture: many distinct byte values, and neighbouring pixels usually
+ * but not always equal. Flat fills and code both score badly.
+ */
+void fb_scan(CPU *cpu, const char *path)
+{
+    const uint32_t SIZE = 320u * 200u;
+    uint32_t best_at = 0;
+    long best_score = 0;
+
+    for (uint32_t base = 0x1000; base + SIZE < 0xA0000u; base += 0x400) {
+        int seen[256]; memset(seen, 0, sizeof seen);
+        long same = 0, distinct = 0;
+        for (uint32_t i = 0; i < SIZE; i += 4) {          /* sample, for speed */
+            uint8_t v = cpu->mem[base + i];
+            if (!seen[v]) { seen[v] = 1; distinct++; }
+            if (i && v == cpu->mem[base + i - 4]) same++;
+        }
+        long runs = same * 100 / (SIZE / 4);              /* percent flat */
+        if (distinct < 16 || runs > 96 || runs < 10) continue;
+        long score = distinct * runs;
+        if (score > best_score) { best_score = score; best_at = base; }
+    }
+
+    if (!best_score) {
+        fprintf(stderr, "[fb] no picture-shaped buffer found\n");
+        return;
+    }
+    fprintf(stderr, "[fb] best candidate at %05X (score %ld) -> %s\n",
+            best_at, best_score, path);
+    /* Also dump the raw indices and the DAC. If the game has not programmed a
+     * palette yet, every index maps to black and the BMP looks empty even when
+     * there is a picture sitting right there. */
+    { FILE *r = fopen("work/fb_scan.raw", "wb");
+      if (r) { fwrite(&cpu->mem[best_at], 1, 320 * 200, r); fclose(r); } }
+    { FILE *r = fopen("work/fb_scan.pal", "wb");
+      if (r) { fwrite(g_palette, 1, sizeof g_palette, r); fclose(r); } }
+    { int pal_set = 0;
+      for (size_t i = 0; i < sizeof g_palette; i++) if (((uint8_t *)g_palette)[i]) { pal_set = 1; break; }
+      fprintf(stderr, "[fb] DAC palette %s\n", pal_set ? "programmed" : "still all zero"); }
+    vga_write_bmp(path, &cpu->mem[best_at], 320, 200, (const uint8_t *)g_palette);
+}
+
 void vga_snapshot(CPU *cpu, const char *path)
 {
     vga_write_bmp(path, &cpu->mem[VGA_BASE], VGA_W, VGA_H,
@@ -425,7 +473,16 @@ void int_handler(CPU *cpu, int vec) {
             break;
         case 0x16: cpu->ax = 0; cpu->flags |= FLAG_ZF; break;  /* keyboard: no key */
         case 0x33: cpu->ax = 0; break;                          /* mouse: absent */
-        case 0x66: break;                                       /* Miles AIL: stub */
+        case 0x66:                                  /* Miles Sound System AIL */
+            /* The game binds AIL through 25 little `mov ax,FN / int 66h / retf`
+             * thunks. Leaving AX alone returns the function number, which is
+             * non-zero -- and fn_09035 polls AIL 0x689 (is anything playing?)
+             * until it answers zero, so a no-op stub spins there forever.
+             * With no driver loaded nothing is ever playing: answer zero. */
+            trace("[AIL] fn=%04X\n", cpu->ax);
+            cpu->ax = 0;
+            cpu->flags &= ~FLAG_CF;
+            break;
         case 0x1A: {                                /* BIOS tick count */
             /* A frozen clock is an infinite wait: every `spin until ticks >=
              * start + n` loop in the game never finishes. Derive real ticks

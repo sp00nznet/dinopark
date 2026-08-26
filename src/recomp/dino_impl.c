@@ -168,3 +168,12 @@ void fn_00419(CPU *cpu)
     cpu->dx = 0x0000;
     cpu->sp = (uint16_t)(cpu->sp + 4);         /* retf */
 }
+
+/* The MIDI half of the same story: MIDPAK.COM, loaded and entered the same way,
+ * with the same "Unable to load '%s'" and the same fatal zero. */
+void fn_005E0(CPU *cpu)
+{
+    cpu->ax = 0x0001;
+    cpu->dx = 0x0000;
+    cpu->sp = (uint16_t)(cpu->sp + 4);         /* retf */
+}
