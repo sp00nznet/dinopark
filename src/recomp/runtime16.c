@@ -102,6 +102,11 @@ unsigned long g_port_reads[8];   /* 3DA, 3C5, 3CF, 3C9, other */
 static uint8_t g_plane[4][0x10000];
 static int g_chain4 = 1;                   /* mode 13h until told otherwise */
 static uint8_t g_read_plane;               /* Graphics reg 4: read map select */
+static unsigned long g_plane_writes[4];    /* writes, not occupancy: an even
+                                            * blit touches each plane equally,
+                                            * and overwrites hide in occupancy */
+static unsigned long g_mask_writes[16];    /* by Map Mask low nibble */
+static uint8_t g_blit_cs14_lo, g_blit_cs14_hi;
 
 /* Watch the real walker instead of reimplementing it.
  *
@@ -258,14 +263,18 @@ static void f5_note(uint32_t addr, uint8_t val)
 
 int recomp_mem_write8(CPU *cpu, uint32_t addr, uint8_t val)
 {
+    /* remember the blitter's mode word as it is written */
+    if (addr == 0x091D0u + 0x14) g_blit_cs14_lo = val;
+    if (addr == 0x091D0u + 0x15) g_blit_cs14_hi = val;
     watch_note(addr, val);
     hdr_write_note(addr, val);
     chain_check(cpu, addr, val);
     f5_note(addr, val);
     if (addr < VGA_LOW || addr >= VGA_HIGH || g_chain4) return 0;
     uint32_t off = addr - VGA_LOW;
+    g_mask_writes[g_map_mask & 0xF]++;
     for (int p = 0; p < 4; p++)
-        if (g_map_mask & (1u << p)) g_plane[p][off] = val;
+        if (g_map_mask & (1u << p)) { g_plane[p][off] = val; g_plane_writes[p]++; }
     return 1;
 }
 
@@ -379,6 +388,36 @@ void vga_sample(CPU *cpu)
     g_best_distinct = distinct;
     memcpy(g_best_frame, f, sizeof g_best_frame);
     memcpy(g_best_pal, g_palette, sizeof g_best_pal);
+}
+
+/* Per-plane occupancy. In an unchained mode a 320-wide row is four planes of
+ * 80 bytes, and the blitter makes one pass per plane with the Map Mask set. If
+ * the passes are not landing where they should, the giveaway is the planes
+ * holding wildly different amounts -- or only one holding anything at all. */
+void vga_plane_report(void)
+{
+    for (int p = 0; p < 4; p++) {
+        long nz = 0, distinct = 0;
+        int seen[256]; memset(seen, 0, sizeof seen);
+        for (uint32_t i = 0; i < (uint32_t)(VGA_W / 4) * VGA_H; i++) {
+            uint8_t v = g_plane[p][i];
+            if (v && v != 0xFF) nz++;
+            if (!seen[v]) { seen[v] = 1; distinct++; }
+        }
+        fprintf(stderr, "[plane] %d: %ld set, %ld distinct, %lu writes\n",
+                p, nz, distinct, g_plane_writes[p]);
+    }
+    /* cs:[0x14] in the blitter's segment decides whether it duplicates the
+     * plane mask into the high nibble; without that the mask walks through
+     * four values that select nothing. */
+    fprintf(stderr, "[plane] blitter cs:[0x14] = %04X\n",
+            (unsigned)(g_blit_cs14_lo | (g_blit_cs14_hi << 8)));
+    fprintf(stderr, "[plane] map mask now %02X, read plane %d, %s\n",
+            g_map_mask, g_read_plane, g_chain4 ? "chained" : "unchained");
+    for (int m = 0; m < 16; m++)
+        if (g_mask_writes[m])
+            fprintf(stderr, "[plane] mask %X: %lu writes%s\n", m, g_mask_writes[m],
+                    m ? "" : "   <-- selects no plane; these are dropped");
 }
 
 void vga_best_dump(const char *path)
@@ -772,6 +811,7 @@ static void int21(CPU *cpu) {
             /* The last frame is usually a clear; the interesting one is
              * whatever had the most colour in it. */
             vga_best_dump("work/best_frame.bmp");
+            vga_plane_report();
             /* The game composes offscreen and may never blit, so also go
              * looking for a picture-shaped buffer in RAM. */
             fb_scan(cpu, "work/fb_scan.bmp");

@@ -40,6 +40,7 @@ unsigned long vga_ticks(void);   /* BIOS 18.2 Hz tick count */
 void vga_flush(CPU *cpu);
 void vga_sample(CPU *cpu);       /* remember the richest frame shown */
 void vga_best_dump(const char *path);
+void vga_plane_report(void);     /* per-plane occupancy */
 void vga_snapshot(CPU *cpu, const char *path);
 void fb_scan(CPU *cpu, const char *path);   /* find an offscreen framebuffer */
 void heap_dump(CPU *cpu);        /* the game's own heap chain */

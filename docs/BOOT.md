@@ -419,19 +419,59 @@ the `font.pic` it loaded itself.
 [best] richest frame seen used 3 distinct indices -> work/best_frame.bmp
 ```
 
-### Where it stops now
+### The heap, with the compactor gone
 
-The glyphs are legible as glyphs but wrong: compressed into roughly a third of
-the width they should occupy. Something in the horizontal step is off -- either
-the plane the Map Mask selects per pass, or `di` advancing once per source
-group where it should advance per plane column. `work/best_frame.raw` and
-`work/best_frame.pal` are written alongside the BMP so a candidate fix can be
-checked against them directly.
+Worth recording, because it is the strongest evidence that disabling compaction
+was the right probe rather than a papering-over:
 
-There is also a reference to check against, which the heap never had:
-`tools/decode_act.py` renders `ALBERT.ACT` at 585/585 pixels from the same
-control encoding, so the blitter's output can be diffed against known-correct
-data rather than judged by eye.
+```
+[heap] 107 blocks, stopped at 9000: reached the end marker
+[chain] the block chain was consistent throughout
+```
+
+107 blocks, chaining cleanly from `first` to `last`, and the invariant check
+never fires. The allocator is fine on its own; only the compactor broke it.
+
+### Narrowing the blit
+
+The glyphs draw compressed, so the runtime now accounts for plane traffic --
+writes rather than occupancy, since overwrites hide in occupancy -- and reports
+what the Map Mask was for each:
+
+```
+[plane] 0: 194 set, 3 distinct, 241999 writes
+[plane] 1:  38 set, 2 distinct, 241574 writes
+[plane] 2:  43 set, 3 distinct, 241579 writes
+[plane] 3:  46 set, 2 distinct, 241582 writes
+[plane] blitter cs:[0x14] = 0000
+[plane] mask 1: 463   mask 2: 38   mask 4: 43   mask 8: 46
+[plane] mask F: 241536
+```
+
+Reading that: mask `F` is the full-screen clears, and the four single-plane
+masks are the blit itself. Several things are ruled out by it --
+
+- **No writes are dropped.** Mask low-nibble 0 never appears, so the mask never
+  walks onto a value selecting no plane.
+- **The mask rotation is right.** `cs:[0x14]` is zero, which is the branch that
+  duplicates the plane bit into the high nibble, giving `11/22/44/88` -- the
+  sequence that carries out after exactly four shifts. Without it the mask would
+  pass through four values that select nothing.
+- **All four planes are reached.**
+
+What is left is a real imbalance: **463 writes under plane 0's mask against
+about 40 for each of the others**, which is the compression showing up in the
+numbers. Either the per-plane count is wrong for the first pass, or plane 0's
+pass runs for many blits where the others run for one.
+
+The way to settle that is the harness pattern `src/test_sprintf.c` established:
+drive the blitter directly on `ALBERT.ACT` and diff its planes against
+`tools/decode_act.py`, which renders the same sprite at 585/585 pixels from the
+same control encoding. Unlike everything in the heap, this has a known-correct
+answer to compare against. The outer entry is `fn_09ACB`
+(`FUN_091d_08fb` -- note the doc says `191d`, but the code is at image
+`0x091D0 + 0x8FB`), taking a far pointer at `[bp+6]` and words at `[bp+0xA]`
+through `[bp+0x1A]`, which is the part still to be pinned down.
 
 ## The segment map
 
