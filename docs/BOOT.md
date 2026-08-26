@@ -489,13 +489,42 @@ after    mask 1: 150   mask 2: 147   mask 4: 147   mask 8: 146
 
 The drawn pixels are solid contiguous shapes now rather than scattered dots.
 
+### Where the writes go
+
+The blit is right but the screen still holds almost nothing, so the question is
+where the drawing actually lands. `write_histogram()` counts writes per 4 KB
+page -- no guessing at what a framebuffer looks like, just which page is busiest:
+
+```
+[hot] 3E000..3EFFF : 786792601 writes
+[hot] 3A000..3AFFF :  98149046 writes
+[hot] 37000..37FFF :    312750 writes
+[hot] A1000..A1FFF :     16932 writes   (the VGA window)
+```
+
+`0x3E000` is inside the stack (`SS = 0x3D04`), and 786 million writes to it in
+fifteen seconds is not drawing -- it is a tight loop. `vga_sample()` was also
+moved off the 18.2 Hz timer onto VGA write activity, so the richest frame is
+caught whenever it happens rather than whenever the clock ticks, and it still
+finds only three distinct indices. The game is not composing a screen anywhere;
+it is spinning.
+
 ### Where it stops now
 
-Still not a readable screen: the richest frame is a single band of shapes rather
-than the credits or the MECC logo. Whether that is the sampler catching a
-partial draw or the game only ever drawing one band is the next thing to find
-out -- and `vga_sample()` keeping the best frame at 18.2 Hz is probably too
-coarse for a sequence that composes offscreen.
+```
+fn_00000  fn_0C6A6  fn_0CDDB  fn_18186  fn_17E58  fn_0EEDB  fn_04FB8
+```
+
+`fn_04FB8` is `memcpy` -- `les di / lds si / rep movsw` and out -- so it is a
+leaf and cannot be the loop. `fn_0EEDB` is calling it endlessly. That function
+opens with a stack check, `sub sp, 0xC`, and `lea ax, [bp+0xC] / mov [bp-2], ss
+/ mov [bp-4], ax`, which is a va_list being built, but it does **not** call the
+printf core at `0x1DBD` -- only `memcpy` and `0x101F0`. So it is not the
+formatting path that was already replaced; it is something else looping.
+
+That loop is the next thing to look at, and the tools for it are already here:
+`DINO_WATCH` on whatever it keeps rewriting, and the histogram to confirm the
+page it churns.
 
 ## The segment map
 

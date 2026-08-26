@@ -58,6 +58,7 @@ static DWORD WINAPI watchdog(LPVOID arg) {
     if (g_cpu) vga_snapshot(g_cpu, "work/vga_exit.bmp");
     vga_best_dump("work/best_frame.bmp");
     vga_plane_report();
+    write_histogram();
     if (g_cpu) fb_scan(g_cpu, "work/fb_scan.bmp");
     if (g_cpu) heap_dump(g_cpu);
     if (g_cpu) find_signature(g_cpu, "UNC2");
@@ -98,6 +99,7 @@ int main(int argc, char **argv) {
     vga_snapshot(&cpu, "work/vga_exit.bmp");
     vga_best_dump("work/best_frame.bmp");
     vga_plane_report();
+    write_histogram();
     fb_scan(&cpu, "work/fb_scan.bmp");
     heap_dump(&cpu);
     find_signature(&cpu, "UNC2");

@@ -261,17 +261,51 @@ static void f5_note(uint32_t addr, uint8_t val)
     g_f5_n++;
 }
 
+/* Where does the drawing actually go?
+ *
+ * The game writes only a few hundred pixels to the VGA window but loads whole
+ * screens, so it must be composing somewhere else. A histogram of writes by 4 KB
+ * page finds that buffer without guessing what a framebuffer looks like -- the
+ * hottest page outside the card is where the picture is being built. */
+static unsigned long g_page_writes[256];
+
+void write_histogram(void)
+{
+    int top[8];
+    for (int n = 0; n < 8; n++) {
+        int best = -1;
+        for (int i = 0; i < 256; i++) {
+            int dup = 0;
+            for (int k = 0; k < n; k++) if (top[k] == i) dup = 1;
+            if (dup) continue;
+            if (best < 0 || g_page_writes[i] > g_page_writes[best]) best = i;
+        }
+        top[n] = best;
+        if (g_page_writes[best] == 0) break;
+        fprintf(stderr, "[hot] %05X..%05X : %lu writes%s\n",
+                (unsigned)best * 0x1000, (unsigned)best * 0x1000 + 0xFFF,
+                g_page_writes[best],
+                (best >= 0xA0 && best < 0xB0) ? "   (the VGA window)" : "");
+    }
+}
+
 int recomp_mem_write8(CPU *cpu, uint32_t addr, uint8_t val)
 {
     /* remember the blitter's mode word as it is written */
     if (addr == 0x091D0u + 0x14) g_blit_cs14_lo = val;
     if (addr == 0x091D0u + 0x15) g_blit_cs14_hi = val;
+    g_page_writes[(addr >> 12) & 0xFF]++;
     watch_note(addr, val);
     hdr_write_note(addr, val);
     chain_check(cpu, addr, val);
     f5_note(addr, val);
     if (addr < VGA_LOW || addr >= VGA_HIGH || g_chain4) return 0;
     uint32_t off = addr - VGA_LOW;
+    /* Sample on drawing activity, not on a wall clock. An 18.2 Hz timer is far
+     * too coarse for a sequence that composes a screen and moves on; tying it
+     * to VGA traffic means the richest moment gets seen whenever it happens. */
+    { static unsigned long n; extern void vga_sample(CPU *);
+      if ((++n & 0x7FF) == 0) vga_sample(cpu); }
     g_mask_writes[g_map_mask & 0xF]++;
     for (int p = 0; p < 4; p++)
         if (g_map_mask & (1u << p)) { g_plane[p][off] = val; g_plane_writes[p]++; }
