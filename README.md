@@ -118,11 +118,12 @@ in parallel — see [`docs/FORMATS.md`](docs/FORMATS.md) (WIP).
 
 ## Status
 
-🚧 **Phase 5 — the whole game boots as native code and renders its art.**
+🚧 **Phase 6 — it runs. The intro plays, the park animates, and it takes input.**
 
 From a dusty 1993 floppy to a native executable that runs its real Borland
-startup, reaches `main`, and draws DinoPark's screens and dinosaurs in colour —
-no emulator, no copyrighted bytes in this repo.
+startup, plays its whole credit sequence, reaches its attract mode with the park
+animating and the credits rolling, and answers the keyboard and mouse — no
+emulator, no copyrighted bytes in this repo.
 
 - ✅ Rights situation researched (see below) — abandonware; **no game files shipped here**.
 - ✅ Binary triaged: unpacked Borland-C 16-bit DOS exe, **large model**, Miles audio.
@@ -175,9 +176,27 @@ no emulator, no copyrighted bytes in this repo.
   dispatch**: indirect jumps land on mid-function case-blocks, which don't
   recompile cleanly as standalone functions (garbage = code bytes read as
   pointers). Convergence harness + instruction-boundary validation in place.
-- ⏭️ **Next (road to interactive):** proper jump-table recovery (lift `switch`
-  cases inline), then startup→main→game loop and SDL2 video/input — the civ
-  "interactive boot" arc.
+- 🎬 **Phase 6 — the game runs.** Five things stood between booting and running,
+  and each was found by instrumenting rather than reasoning:
+  - **The memory manager was a stub.** The analyzer's last function ends at
+    `2F831` and the allocator's assembly helpers all live above it, with no
+    Borland prologue to find them by — including the block-mover compaction
+    slides blocks with, which had been lifted to `cpu->sp += 2`. Compaction
+    could not work, the heap fragmented, and the allocator spun.
+  - **The heap was 64K short.** The PSP sat at `0x9000`, costing the game memory
+    DOS would have left free. It said so itself: `memory err 2 ... maxblk=1424`.
+  - **Word `OUT` dropped AH.** `out dx, ax` lowered to a byte write, so the Mode X
+    Map Mask — set with `mov ax,(mask<<8)|02; out dx,ax` — never updated. The
+    four planes drifted apart and the title screen came out in vertical stripes.
+  - **`int86x` builds its interrupt call on the stack.** Borland writes
+    `push bp / int nn / pop bp / retf` into a stack buffer and far-calls it;
+    there is no lifted function at a stack address, so everything reached that
+    way silently did nothing — including the mouse probe.
+  - **The timer interrupt never ran.** DinoPark hooks INT 8 and drives itself
+    from it. The main loop ran, polled the mouse twenty million times, drew its
+    cursor, and nothing else ever happened, because for the game no time passed.
+- ⏭️ **Next:** the attract loop does not yet hand over to the game proper — find
+  what ends it. Then sound (the AIL calls are answered, not played), and saving.
 
 ---
 
