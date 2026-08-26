@@ -860,6 +860,8 @@ static void int21(CPU *cpu) {
             g_vec_seg[cpu->al] = cpu->ds; g_vec_off[cpu->al] = cpu->dx;
             break;
         case 0x35:                                   /* get interrupt vector */
+            trace("[INT21] get vector %02X -> %04X:%04X\n",
+                  cpu->al, g_vec_seg[cpu->al], g_vec_off[cpu->al]);
             cpu->es = g_vec_seg[cpu->al]; cpu->bx = g_vec_off[cpu->al];
             break;
         case 0x30: cpu->ax = 0x0005; break;          /* DOS version 5.0 */
@@ -1027,6 +1029,66 @@ void bios_int10(CPU *cpu) { int_handler(cpu, 0x10); }
 void bios_int16(CPU *cpu) { int_handler(cpu, 0x16); }
 void mouse_int33(CPU *cpu){ int_handler(cpu, 0x33); }
 
+/* INT 33h -- the mouse driver.
+ *
+ * Answering "absent" made the game say so on its own title screen and carry on
+ * without a pointer. It only needs the handful of calls below; the window
+ * already knows where the pointer is, so this is mostly a units conversion.
+ *
+ * Position is reported in the driver's virtual screen, which for the 320-wide
+ * graphics modes is 640 across and the real height down -- the horizontal
+ * coordinate always comes back doubled, and every game of the era divides it
+ * again. Ranges set through functions 7 and 8 are honoured so a game that
+ * clamps the pointer to part of the screen gets what it asked for.
+ *
+ * ponytail: no cursor is drawn here. DinoPark draws its own, and a driver
+ * cursor would be a second one; add one if a later screen turns out to expect
+ * the driver to do it. */
+static int g_m_xmin, g_m_xmax = 639, g_m_ymin, g_m_ymax = 199;
+static int g_m_lastx, g_m_lasty;                /* for the motion counters */
+
+static void mouse33(CPU *cpu)
+{
+    int x, y, b;
+    vga_window_mouse(&x, &y, &b);
+    x *= 2;                                      /* 320 pixels across 640 units */
+    if (x < g_m_xmin) x = g_m_xmin; else if (x > g_m_xmax) x = g_m_xmax;
+    if (y < g_m_ymin) y = g_m_ymin; else if (y > g_m_ymax) y = g_m_ymax;
+
+    switch (cpu->ax) {
+        case 0x0000:                             /* reset and detect */
+            cpu->ax = 0xFFFF;                    /* installed */
+            cpu->bx = 2;                         /* two buttons */
+            g_m_xmin = g_m_ymin = 0;
+            g_m_xmax = 639; g_m_ymax = VGA_H - 1;
+            trace("[MOUSE] reset -> present\n");
+            break;
+        case 0x0001: case 0x0002: break;         /* show / hide the driver cursor */
+        case 0x0003:                             /* position and buttons */
+            cpu->bx = (uint16_t)b;
+            cpu->cx = (uint16_t)x;
+            cpu->dx = (uint16_t)y;
+            break;
+        case 0x0004: break;                      /* set position: the host owns it */
+        case 0x0007: g_m_xmin = cpu->cx; g_m_xmax = cpu->dx; break;
+        case 0x0008: g_m_ymin = cpu->cx; g_m_ymax = cpu->dx; break;
+        case 0x000B:                             /* motion since the last call */
+            cpu->cx = (uint16_t)(int16_t)(x - g_m_lastx);
+            cpu->dx = (uint16_t)(int16_t)(y - g_m_lasty);
+            g_m_lastx = x; g_m_lasty = y;
+            break;
+        case 0x0005: case 0x0006:                /* press / release counts */
+            cpu->ax = (uint16_t)b;
+            cpu->bx = 0;                         /* no presses recorded between calls */
+            cpu->cx = (uint16_t)x;
+            cpu->dx = (uint16_t)y;
+            break;
+        default:
+            trace("[MOUSE] AX=%04X (unhandled)\n", cpu->ax);
+            break;
+    }
+}
+
 void int_handler(CPU *cpu, int vec) {
     switch (vec) {
         case 0x21: int21(cpu); break;
@@ -1076,7 +1138,7 @@ void int_handler(CPU *cpu, int vec) {
                 cpu->flags &= ~FLAG_ZF;
             }
             break;
-        case 0x33: cpu->ax = 0; break;                          /* mouse: absent */
+        case 0x33: mouse33(cpu); break;
         case 0x66:                                  /* Miles Sound System AIL */
             /* The game binds AIL through 25 little `mov ax,FN / int 66h / retf`
              * thunks. Leaving AX alone returns the function number, which is
@@ -1171,6 +1233,16 @@ int dino_load_image(CPU *cpu, const char *path) {
     cpu->mem[e++] = 0;                        /* terminating empty string */
     cpu->mem[e++] = 1; cpu->mem[e++] = 0;     /* one trailing string follows */
     memcpy(&cpu->mem[e], progpath, sizeof progpath);   /* sizeof: keeps the NUL */
+
+    /* A mouse. The game looks for one by fetching the INT 33h vector and
+     * treating a null ES:BX as "no driver", then says so on its own title
+     * screen. Point it somewhere non-null; the vector is never called, the
+     * game goes through int86(0x33) once it believes a driver is there.
+     *
+     * Only the shadow table, not the real interrupt vector at 0000:00CC --
+     * the image loads at linear 0 here, so that address is the game's own
+     * code and writing a pointer over it would corrupt it. */
+    g_vec_seg[0x33] = 0xC000; g_vec_off[0x33] = 0x0100;
 
     /* MZ initial register state (image space); DOS enters with DS=ES=PSP */
     cpu->cs = LOADSEG;  cpu->ip = 0;                      /* CS:IP = 0000:0000 */

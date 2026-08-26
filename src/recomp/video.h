@@ -20,6 +20,9 @@ void vga_window_present(const uint8_t *pixels, const uint8_t *pal6);
 
 /* Service the message queue. Returns 0 once the user has closed the window. */
 int  vga_window_pump(void);
+/* Pointer position in VGA pixels and a button bitmask (1 left, 2 right).
+ * Off-Windows there is no window and no mouse: it reports the origin. */
+void vga_window_mouse(int *x, int *y, int *buttons);
 
 /* Block until the window is closed (or return at once if there is none). */
 void vga_window_wait(void);

@@ -219,3 +219,63 @@ static void ldiv_common(CPU *cpu, int is_unsigned, int want_remainder)
 }
 
 void fn_0172F(CPU *cpu) { ldiv_common(cpu, 0, 0); }   /* signed quotient */
+
+/*
+ * int86x(int intno, union REGS *in, union REGS *out, struct SREGS *seg)
+ *
+ * Borland builds the interrupt call at run time: it writes `push bp / int nn /
+ * pop bp / retf` into a buffer on its own stack and far-calls it. A static
+ * recompiler has no lifted function at a stack address, so the call went
+ * nowhere and every service reached this way silently did nothing.
+ *
+ * That is how the game looks for a mouse -- int86x(0x21, AX=3533h) to fetch the
+ * INT 33h vector -- so it always concluded there wasn't one and said so on its
+ * own title screen. Doing the call here instead reaches the same handler a
+ * direct `int` would.
+ *
+ * Field offsets are read off the caller: union REGS is ax, bx, cx, dx, si, di,
+ * cflag, flags at 0..0xE; struct SREGS is es, cs, ss, ds at 0..6.
+ */
+static void int86x_common(CPU *cpu, int with_segs)
+{
+    uint16_t intno  = (uint16_t)ARG(0);
+    uint16_t inoff  = ARG(1), inseg  = ARG(2);
+    uint16_t outoff = ARG(3), outseg = ARG(4);
+    uint16_t soff = 0, sseg = 0;
+    if (with_segs) { soff = ARG(5); sseg = ARG(6); }
+
+    uint16_t save_ds = cpu->ds, save_es = cpu->es;
+
+    cpu->ax = mem_read16(cpu, inseg, (uint16_t)(inoff + 0x0));
+    cpu->bx = mem_read16(cpu, inseg, (uint16_t)(inoff + 0x2));
+    cpu->cx = mem_read16(cpu, inseg, (uint16_t)(inoff + 0x4));
+    cpu->dx = mem_read16(cpu, inseg, (uint16_t)(inoff + 0x6));
+    cpu->si = mem_read16(cpu, inseg, (uint16_t)(inoff + 0x8));
+    cpu->di = mem_read16(cpu, inseg, (uint16_t)(inoff + 0xA));
+    if (with_segs) {
+        cpu->es = mem_read16(cpu, sseg, (uint16_t)(soff + 0x0));
+        cpu->ds = mem_read16(cpu, sseg, (uint16_t)(soff + 0x6));
+    }
+
+    int_handler(cpu, (int)(intno & 0xFF));
+
+    mem_write16(cpu, outseg, (uint16_t)(outoff + 0x0), cpu->ax);
+    mem_write16(cpu, outseg, (uint16_t)(outoff + 0x2), cpu->bx);
+    mem_write16(cpu, outseg, (uint16_t)(outoff + 0x4), cpu->cx);
+    mem_write16(cpu, outseg, (uint16_t)(outoff + 0x6), cpu->dx);
+    mem_write16(cpu, outseg, (uint16_t)(outoff + 0x8), cpu->si);
+    mem_write16(cpu, outseg, (uint16_t)(outoff + 0xA), cpu->di);
+    mem_write16(cpu, outseg, (uint16_t)(outoff + 0xC), (uint16_t)(cpu->flags & 1));
+    mem_write16(cpu, outseg, (uint16_t)(outoff + 0xE), cpu->flags);
+    if (with_segs) {
+        mem_write16(cpu, sseg, (uint16_t)(soff + 0x0), cpu->es);
+        mem_write16(cpu, sseg, (uint16_t)(soff + 0x6), cpu->ds);
+    }
+
+    cpu->ds = save_ds; cpu->es = save_es;
+    cpu->ax = mem_read16(cpu, outseg, (uint16_t)(outoff + 0x0));   /* returns .x.ax */
+    cpu->sp = (uint16_t)(cpu->sp + 4);         /* retf */
+}
+
+void fn_02A35(CPU *cpu) { int86x_common(cpu, 1); }   /* int86x */
+void fn_02A04(CPU *cpu) { int86x_common(cpu, 0); }   /* int86  */

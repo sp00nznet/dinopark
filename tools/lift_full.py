@@ -47,6 +47,10 @@ COMPILED_BLITS = {
 }
 
 OVERRIDES = {
+    0x02A35: 'int86x -- Borland assembles `int nn` on the stack and far-calls'
+             ' it, which lands on no lifted function at all. The mouse probe'
+             ' goes through here',
+    0x02A04: 'int86, same construction',
     0x05BE8: 'sprintf -- the Borland printf core reads its format from the'
              ' wrong segment however it is driven (see src/test_sprintf.c)',
     0x00419: 'Miles driver load -- the .COM driver is a separate binary we do'
