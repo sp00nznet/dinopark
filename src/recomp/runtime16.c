@@ -702,6 +702,99 @@ void port_out8(CPU *cpu, uint16_t port, uint8_t val) {
     }
 }
 
+/* Keyboard.
+ *
+ * The intro sits in a palette fade polling INT 16h AH=1 for a key to skip it,
+ * so answering `no key` forever means the game never leaves its own title
+ * sequence. Answering `yes` on every poll is just as wrong: the poll runs far
+ * faster than a person types, and the game would consume hundreds of thousands
+ * of keypresses -- civ hit precisely that and paced its input off the BIOS
+ * tick, which is what this does.
+ *
+ * DINO_KEYS is a comma-separated scancode script, e.g. `39,39,1` for two
+ * spaces then escape; it defaults to space, which is what the intro wants. The
+ * ASCII byte is filled in for the few keys the game is likely to read that
+ * way. */
+static uint16_t g_key_script[64];
+static int g_key_n, g_key_i = -1;
+static uint16_t g_key_pending;
+static unsigned long g_key_last_tick;
+
+#define KEY_PERIOD 9                       /* ticks: about half a second */
+
+static uint8_t scancode_ascii(uint8_t sc)
+{
+    switch (sc) {
+        case 0x39: return ' ';
+        case 0x1C: return 0x0D;            /* Enter */
+        case 0x01: return 0x1B;            /* Escape */
+        default:   return 0;
+    }
+}
+
+static void key_init(void)
+{
+    if (g_key_i >= 0) return;
+    g_key_i = 0;
+    const char *s = getenv("DINO_KEYS");
+    if (!s || !*s) {
+        g_key_script[g_key_n++] = 0x39;    /* space, to advance the intro */
+        return;
+    }
+    while (*s && g_key_n < 64) {
+        g_key_script[g_key_n++] = (uint16_t)strtoul(s, (char **)&s, 16);
+        while (*s == ',' || *s == ' ') s++;
+    }
+}
+
+/* The game does not read keys from the BIOS. It installs its own INT 9 handler
+ * (07AC:003E), which takes the scancode from port 0x60 and files it in a ring
+ * of its own: sixteen bytes at DGROUP:0x148, tail at 0x144, head at 0x146, plus
+ * a held-flag per scancode at 0x158 so a key queues once until it is released.
+ * Its INT 16h reads exist only to drain the BIOS buffer and are discarded.
+ *
+ * So put the keys where it actually looks, doing the same bookkeeping the ISR
+ * does -- which also means a press has to be followed by a release, or the
+ * held flag blocks every repeat.
+ */
+static void key_inject(CPU *cpu, uint8_t sc)
+{
+    uint8_t code = sc & 0x7F;
+    if (sc & 0x80) {                            /* release */
+        mem_write8(cpu, g_dgroup, (uint16_t)(0x158 + code), 0);
+        return;
+    }
+    if (mem_read8(cpu, g_dgroup, (uint16_t)(0x158 + code))) return;   /* held */
+    mem_write8(cpu, g_dgroup, (uint16_t)(0x158 + code), 1);
+
+    uint16_t tail = mem_read16(cpu, g_dgroup, 0x144);
+    uint16_t next = (uint16_t)((tail + 1) & 0xF);
+    if (next == mem_read16(cpu, g_dgroup, 0x146)) return;             /* full */
+    mem_write8(cpu, g_dgroup, (uint16_t)(0x148 + (tail & 0xF)), code);
+    mem_write16(cpu, g_dgroup, 0x144, next);
+}
+
+/* One press, then its release, one per KEY_PERIOD ticks. */
+static void key_tick(CPU *cpu)
+{
+    key_init();
+    if (!g_key_n || !g_dgroup) return;
+    unsigned long t = vga_ticks();
+    if (t - g_key_last_tick < KEY_PERIOD) return;
+    g_key_last_tick = t;
+
+    static int releasing;
+    uint8_t sc = (uint8_t)g_key_script[g_key_i];
+    if (releasing) {
+        key_inject(cpu, (uint8_t)(sc | 0x80));
+        if (g_key_i + 1 < g_key_n) g_key_i++;   /* hold on the last one */
+    } else {
+        key_inject(cpu, sc);
+        trace("[kbd] scancode %02X into the game\'s own queue\n", sc);
+    }
+    releasing = !releasing;
+}
+
 /* ---- software interrupts ---------------------------------------------- */
 static void int21(CPU *cpu) {
     uint8_t ah = cpu->ah;
@@ -917,7 +1010,17 @@ void int_handler(CPU *cpu, int vec) {
                 default: trace("[INT10] AH=%02X AL=%02X (unhandled)\n", cpu->ah, cpu->al); break;
             }
             break;
-        case 0x16: cpu->ax = 0; cpu->flags |= FLAG_ZF; break;  /* keyboard: no key */
+        case 0x16:                                  /* BIOS keyboard */
+            key_tick(cpu);
+            if (cpu->ah == 0x01 || cpu->ah == 0x11) {   /* is one waiting? */
+                if (g_key_pending) { cpu->ax = g_key_pending; cpu->flags &= ~FLAG_ZF; }
+                else                { cpu->ax = 0;          cpu->flags |= FLAG_ZF; }
+            } else {                                     /* AH=0/0x10: take it */
+                cpu->ax = g_key_pending;
+                g_key_pending = 0;
+                cpu->flags &= ~FLAG_ZF;
+            }
+            break;
         case 0x33: cpu->ax = 0; break;                          /* mouse: absent */
         case 0x66:                                  /* Miles Sound System AIL */
             /* The game binds AIL through 25 little `mov ax,FN / int 66h / retf`

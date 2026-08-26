@@ -509,22 +509,57 @@ caught whenever it happens rather than whenever the clock ticks, and it still
 finds only three distinct indices. The game is not composing a screen anywhere;
 it is spinning.
 
+### The intro was waiting for a key
+
+The 786 million stack writes were not a bug. `fn_0EEDB` is the **palette
+rotator**: it shuffles 3-byte entries in the 768-byte table at `DGROUP:0x9DBF`
+and calls `0x101F0` to push the result to the DAC. One call is about 57 `memcpy`s
+and one DAC update -- a fade. The caller loops it, and its exit condition is
+
+```
+0C66E  call 07AC:00E2      read a key
+0C679  cmp si, 0x39        space?
+0C67E  cmp si, 0x01        escape?
+```
+
+DinoPark was sitting in its own MECC intro, fading the palette, waiting to be
+told to move on.
+
+Answering "no key" forever meant it never was. Answering "yes" on every poll is
+just as wrong -- the poll runs far faster than a person types -- so the keys are
+paced off the BIOS tick, one press and one release per half second, exactly as
+civ's harness had to do.
+
+The subtlety is *where* to put them. The game's reader calls INT 16h only to
+drain the BIOS buffer and **throws the result away**; the keys it acts on come
+from its own INT 9 handler at `07AC:003E`, which reads port 0x60 and files
+scancodes in a ring of its own:
+
+```
+sixteen bytes at DGROUP:0x148, tail at 0x144, head at 0x146
+a held-flag per scancode at 0x158, so a key queues once until released
+```
+
+`key_inject()` does that bookkeeping directly -- including the release, without
+which the held flag blocks every repeat. `DINO_KEYS` takes a scancode script
+(`39,39,1` for two spaces then escape) and defaults to space.
+
+With that, the intro advances:
+
+```
+credits.pic  mecc.act  meccharp.abt      the MECC logo and its harp sting
+credits.pic  manley.act                  Manley & Associates
+```
+
+It moves from one credit to the next, which it had never done.
+
 ### Where it stops now
 
-```
-fn_00000  fn_0C6A6  fn_0CDDB  fn_18186  fn_17E58  fn_0EEDB  fn_04FB8
-```
-
-`fn_04FB8` is `memcpy` -- `les di / lds si / rep movsw` and out -- so it is a
-leaf and cannot be the loop. `fn_0EEDB` is calling it endlessly. That function
-opens with a stack check, `sub sp, 0xC`, and `lea ax, [bp+0xC] / mov [bp-2], ss
-/ mov [bp-4], ax`, which is a va_list being built, but it does **not** call the
-printf core at `0x1DBD` -- only `memcpy` and `0x101F0`. So it is not the
-formatting path that was already replaced; it is something else looping.
-
-That loop is the next thing to look at, and the tools for it are already here:
-`DINO_WATCH` on whatever it keeps rewriting, and the histogram to confirm the
-page it churns.
+It stops on the Manley screen rather than going on to the title. The keys keep
+arriving -- press and release every half second, for a minute -- so whatever
+that screen waits for, it is not simply another space. That is the next thing to
+look at, and the live call stack under `-DDINO_SPCHECK` will name it the way it
+named the fade.
 
 ## The segment map
 
