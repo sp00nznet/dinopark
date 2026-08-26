@@ -520,10 +520,52 @@ void vga_best_dump(const char *path)
 /* The composed screen, for harnesses that want to check where pixels landed. */
 const uint8_t *vga_compose_frame(CPU *cpu) { return vga_frame(cpu); }
 
+/* DINO_FILM=<ms>: write work/film_NNN.bmp every so often, so a run that nobody
+ * is watching still leaves behind the sequence of screens it went through.
+ * The single best frame says what the game can draw; a strip says where it
+ * got to. */
+static void film_note(CPU *cpu)
+{
+    static int period = -1;
+    static unsigned long last;
+    static int n;
+    if (period < 0) {
+        const char *e = getenv("DINO_FILM");
+        period = e ? atoi(e) : 0;
+    }
+    if (period <= 0 || n >= 60) return;
+    unsigned long now = host_ms();
+    if (n && now - last < (unsigned long)period) return;
+    last = now;
+    char path[64];
+    snprintf(path, sizeof path, "work/film_%03d.bmp", n++);
+    vga_write_bmp(path, vga_frame(cpu), VGA_W, VGA_H, (const uint8_t *)g_palette);
+}
+
 void vga_flush(CPU *cpu)
 {
     if (!g_vga_live) return;
+    film_note(cpu);
     vga_window_present(vga_frame(cpu), (const uint8_t *)g_palette);
+}
+
+/* At most one frame per 16ms, from anywhere.
+ *
+ * The retrace poll used to be the only place this happened, on the reasoning
+ * that a game pacing itself off the beam is telling you when it wants a frame.
+ * It is -- during the intro. The main loop never touches 3DA at all, so once
+ * the intro was over the window stopped updating entirely and the park was
+ * only ever seen in the exit snapshot. Every software interrupt goes through
+ * int_handler and the main loop polls the mouse through it constantly, so
+ * calling it from both places covers the whole run. */
+void vga_flush_paced(CPU *cpu)
+{
+    static unsigned long last;
+    if (!g_vga_live) return;
+    unsigned long now = host_ms();
+    if (now - last < 16) return;
+    last = now;
+    vga_flush(cpu);
 }
 
 /* The 80x25 text screen at B800:0000. DOS programs put their messages there
@@ -702,10 +744,8 @@ uint8_t port_in8(CPU *cpu, uint16_t port) {
             /* Pace on a clock, not a poll count. One flush per 1024 polls came
              * out at about a frame a second, which is unplayable; how often the
              * game asks says nothing about how often the screen should change. */
-            if (g_vga_live) {
-                unsigned long now = host_ms();
-                if (now - last_ms >= 16) { last_ms = now; vga_flush(cpu); }
-            }
+            vga_flush_paced(cpu);
+            (void)last_ms;
             t ^= 0x09; return t;
         }
         case 0x40:                       /* PIT counter 0, low byte then high */
@@ -879,6 +919,38 @@ static void key_tick(CPU *cpu)
     releasing = !releasing;
 }
 
+/* Handlers the guest installs, for the lifter.
+ *
+ * An address handed to DOS as an interrupt vector is an entry point, the same
+ * way a call target is -- but it is computed at run time, so no static scan
+ * finds it, and the analyzer, which goes by Borland prologues, does not either.
+ * The game's INT 8 handler was one of these: dispatching to it missed, so the
+ * timer never ran and for the game no time ever passed.
+ *
+ * Recorded separately from the dispatch misses. Those are any address the guest
+ * jumped to and are not all entry points; forcing the whole accumulated set
+ * lifted enough wrong ones that the game tripped its own stack check. */
+#define MAXVEC 32
+static unsigned g_noted_vec[MAXVEC];
+static int g_noted_n;
+
+static void note_vector(uint16_t seg, uint16_t off)
+{
+    unsigned a = ((unsigned)seg << 4) + off;
+    if (!a) return;
+    for (int i = 0; i < g_noted_n; i++) if (g_noted_vec[i] == a) return;
+    if (g_noted_n < MAXVEC) g_noted_vec[g_noted_n++] = a;
+}
+
+void dump_vectors(const char *path)
+{
+    if (!g_noted_n) return;
+    FILE *f = fopen(path, "w");
+    if (!f) return;
+    for (int i = 0; i < g_noted_n; i++) fprintf(f, "%05X\n", g_noted_vec[i]);
+    fclose(f);
+}
+
 /* ---- software interrupts ---------------------------------------------- */
 static void int21(CPU *cpu) {
     uint8_t ah = cpu->ah;
@@ -888,6 +960,7 @@ static void int21(CPU *cpu) {
             trace("[INT21] set vector %02X -> %04X:%04X\n",
                   cpu->al, cpu->ds, cpu->dx);
             g_vec_seg[cpu->al] = cpu->ds; g_vec_off[cpu->al] = cpu->dx;
+            note_vector(cpu->ds, cpu->dx);
             break;
         case 0x35:                                   /* get interrupt vector */
             trace("[INT21] get vector %02X -> %04X:%04X\n",
@@ -1074,13 +1147,91 @@ void mouse_int33(CPU *cpu){ int_handler(cpu, 0x33); }
  * ponytail: no cursor is drawn here. DinoPark draws its own, and a driver
  * cursor would be a second one; add one if a later screen turns out to expect
  * the driver to do it. */
+/* DINO_CLICK: drive the pointer for a run with nobody at the mouse.
+ *
+ *   DINO_CLICK=x,y[,delay_ms]   hover there, then click once
+ *   DINO_CLICK=sweep[,delay_ms] hover-and-click a grid of points in turn
+ *
+ * The title screen spins on INT 33h function 3 -- twenty million polls in forty
+ * seconds -- and does nothing else, so without this a headless run can never
+ * leave it. Each point is hovered before the button goes down: the game tracks
+ * the pointer itself and a click teleporting in from nowhere is not a gesture
+ * it would ever see from a person.
+ */
+#define CLICK_HOVER 900                        /* ms in place before pressing */
+#define CLICK_HOLD  300                        /* ms held down */
+#define CLICK_STEP  2400                       /* ms per point in sweep */
+
+static void click_script(int *x, int *y, int *b)
+{
+    static int mode = -1, cx, cy, delay;
+    static unsigned long t0;
+    if (mode < 0) {
+        const char *e = getenv("DINO_CLICK");
+        if (!e) { mode = 0; return; }
+        const char *c = strchr(e, ',');
+        if (!strncmp(e, "sweep", 5)) {
+            mode = 2;
+            delay = c ? atoi(c + 1) : 9000;
+        } else {
+            mode = 1;
+            cx = atoi(e);
+            cy = c ? atoi(c + 1) : 100;
+            const char *d = c ? strchr(c + 1, ',') : NULL;
+            delay = d ? atoi(d + 1) : 9000;
+        }
+        t0 = host_ms();
+    }
+    if (!mode) return;
+    unsigned long dt = host_ms() - t0;
+    if (dt < (unsigned long)delay) return;
+    dt -= (unsigned long)delay;
+
+    int px = cx, py = cy, phase = (int)dt;
+    if (mode == 2) {                           /* 5 across, 4 down */
+        int n = (int)(dt / CLICK_STEP);
+        if (n >= 20) return;
+        px = 32 + (n % 5) * 64;
+        py = 25 + (n / 5) * 50;
+        phase = (int)(dt % CLICK_STEP);
+    }
+    *x = px; *y = py;
+    if (phase >= CLICK_HOVER && phase < CLICK_HOVER + CLICK_HOLD) *b = 1;
+}
+
 static int g_m_xmin, g_m_xmax = 639, g_m_ymin, g_m_ymax = 199;
 static int g_m_lastx, g_m_lasty;                /* for the motion counters */
+/* Press and release counts since each was last asked for, with where they
+ * happened. A menu reads these rather than the live button state: by the time
+ * it looks, a click is usually over. Answering "no presses, ever" is why
+ * clicking the title screen did nothing but move the cursor. */
+static int g_m_prev;
+static int g_m_press[2], g_m_px[2], g_m_py[2];
+static int g_m_rel[2], g_m_rx[2], g_m_ry[2];
+
+static unsigned long g_m_fn[0x40];
+
+void mouse_fn_dump(void)
+{
+    fprintf(stderr, "[mouse] INT 33h functions used:");
+    for (int i = 0; i < 0x40; i++)
+        if (g_m_fn[i]) fprintf(stderr, " %02X=%lu", i, g_m_fn[i]);
+    fprintf(stderr, "\n");
+}
 
 static void mouse33(CPU *cpu)
 {
+    if (cpu->ax < 0x40) g_m_fn[cpu->ax]++;
     int x, y, b;
     vga_window_mouse(&x, &y, &b);
+    click_script(&x, &y, &b);
+
+    for (int i = 0; i < 2; i++) {
+        int mask = 1 << i;
+        if ((b & mask) && !(g_m_prev & mask)) { g_m_press[i]++; g_m_px[i] = x * 2; g_m_py[i] = y; }
+        if (!(b & mask) && (g_m_prev & mask)) { g_m_rel[i]++;   g_m_rx[i] = x * 2; g_m_ry[i] = y; }
+    }
+    g_m_prev = b;
     x *= 2;                                      /* 320 pixels across 640 units */
     if (x < g_m_xmin) x = g_m_xmin; else if (x > g_m_xmax) x = g_m_xmax;
     if (y < g_m_ymin) y = g_m_ymin; else if (y > g_m_ymax) y = g_m_ymax;
@@ -1095,31 +1246,102 @@ static void mouse33(CPU *cpu)
             break;
         case 0x0001: case 0x0002: break;         /* show / hide the driver cursor */
         case 0x0003:                             /* position and buttons */
+            { static int said; if (b && !said) { said = 1;
+                trace("[MOUSE] button %d seen at %d,%d\n", b, x, y); } }
             cpu->bx = (uint16_t)b;
             cpu->cx = (uint16_t)x;
             cpu->dx = (uint16_t)y;
             break;
         case 0x0004: break;                      /* set position: the host owns it */
-        case 0x0007: g_m_xmin = cpu->cx; g_m_xmax = cpu->dx; break;
-        case 0x0008: g_m_ymin = cpu->cx; g_m_ymax = cpu->dx; break;
+        case 0x0007: g_m_xmin = cpu->cx; g_m_xmax = cpu->dx;
+            trace("[MOUSE] x range %d..%d\n", g_m_xmin, g_m_xmax); break;
+        case 0x0008: g_m_ymin = cpu->cx; g_m_ymax = cpu->dx;
+            trace("[MOUSE] y range %d..%d\n", g_m_ymin, g_m_ymax); break;
         case 0x000B:                             /* motion since the last call */
             cpu->cx = (uint16_t)(int16_t)(x - g_m_lastx);
             cpu->dx = (uint16_t)(int16_t)(y - g_m_lasty);
             g_m_lastx = x; g_m_lasty = y;
             break;
-        case 0x0005: case 0x0006:                /* press / release counts */
+        case 0x0005: case 0x0006: {              /* press / release counts */
+            int i = cpu->bx & 1;                 /* BX selects the button */
+            int press = cpu->ax == 0x0005;
             cpu->ax = (uint16_t)b;
-            cpu->bx = 0;                         /* no presses recorded between calls */
-            cpu->cx = (uint16_t)x;
-            cpu->dx = (uint16_t)y;
+            cpu->bx = (uint16_t)(press ? g_m_press[i] : g_m_rel[i]);
+            cpu->cx = (uint16_t)(press ? g_m_px[i] : g_m_rx[i]);
+            cpu->dx = (uint16_t)(press ? g_m_py[i] : g_m_ry[i]);
+            if (press) g_m_press[i] = 0; else g_m_rel[i] = 0;
             break;
+        }
         default:
             trace("[MOUSE] AX=%04X (unhandled)\n", cpu->ax);
             break;
     }
 }
 
+/* Which interrupts the game actually uses, by vector. The park loop turned out
+ * to touch almost none of them, which is why input wired to the INT 16h path
+ * never arrived. */
+unsigned long g_int_calls[256];
+
+void int_vec_dump(void)
+{
+    fprintf(stderr, "[int] calls by vector:");
+    for (int v = 0; v < 256; v++)
+        if (g_int_calls[v]) fprintf(stderr, " %02X=%lu", v, g_int_calls[v]);
+    fprintf(stderr, "\n");
+}
+
+/* The game's own timer interrupt.
+ *
+ * DinoPark hooks INT 8 and drives itself from it; the runtime was recording the
+ * vector and never calling it. The main loop therefore ran, polled the mouse
+ * twenty million times, drew its cursor -- and nothing else ever happened,
+ * because for the game no time had passed.
+ *
+ * Lifted code keeps all its state in the CPU struct and in guest memory, so a
+ * handler can be run from here the way the hardware would: between guest
+ * instructions, on the guest's own stack. `iret` lifts to a bare return that
+ * leaves SP alone, so the interrupt frame is pushed and dropped here; and the
+ * whole register file is put back afterwards, since an ISR that perturbs the
+ * interrupted code's registers is a bug wherever it comes from.
+ */
+static void run_guest_isr(CPU *cpu, int vec)
+{
+    static int inside;
+    uint16_t seg = g_vec_seg[vec], off = g_vec_off[vec];
+    if ((!seg && !off) || inside) return;
+    inside = 1;
+
+    CPU save = *cpu;
+    push16(cpu, cpu->flags);
+    push16(cpu, cpu->cs);
+    push16(cpu, cpu->ip);
+    recomp_dispatch(cpu, seg, off);
+    *cpu = save;
+
+    inside = 0;
+}
+
+/* 18.2 Hz, the rate the PIT interrupts at out of reset. Ticks that go by while
+ * the guest is busy are dropped rather than queued: a burst of catch-up
+ * interrupts is not what the hardware would have done either. */
+static void timer_tick(CPU *cpu)
+{
+    static unsigned long last;
+    unsigned long t = vga_ticks();
+    if (t == last) return;
+    last = t;
+    run_guest_isr(cpu, 0x08);
+}
+
 void int_handler(CPU *cpu, int vec) {
+    g_int_calls[vec & 0xFF]++;
+    vga_flush_paced(cpu);
+    /* Both from here rather than from one particular service: the park loop
+     * polls the mouse and touches almost nothing else, so anything wired to
+     * the INT 16h path alone never runs once the intro is over. */
+    key_tick(cpu);
+    timer_tick(cpu);
     switch (vec) {
         case 0x21: int21(cpu); break;
         case 0x10:                                  /* video BIOS */

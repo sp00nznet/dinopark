@@ -15,6 +15,12 @@ Remove-Item work\dino_boot.exe -ErrorAction SilentlyContinue
 $defs = "/DRECOMP_MEM_HOOK"
 if ($Audit) { $env:DINO_SPCHECK = "1"; $defs += " /DDINO_SPCHECK" }
 if (-not $NoLift) {
+    # Start each round from a clean miss list. Feeding the whole accumulated
+    # set back as forced function starts sounds like convergence but is not:
+    # a dispatch miss is any address the guest jumped to, and forcing 205 of
+    # them lifted enough wrong entries that the game tripped its own stack
+    # check. Vectors the guest installs are recorded separately and are safe,
+    # because an address installed as an interrupt handler IS an entry point.
     Remove-Item work\dino_misses.txt -ErrorAction SilentlyContinue
     python tools\lift_full.py *> work\lift.log
 }

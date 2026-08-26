@@ -42,6 +42,7 @@ void catz_div0(const char *kind);   /* divide-by-zero from lifted code */
 /* present mem[0xA0000] in the window / to a BMP */
 unsigned long vga_ticks(void);   /* BIOS 18.2 Hz tick count */
 void vga_flush(CPU *cpu);
+void vga_flush_paced(CPU *cpu);
 const uint8_t *vga_compose_frame(CPU *cpu);   /* the composed screen */
 void vga_sample(CPU *cpu);       /* remember the richest frame shown */
 void vga_best_dump(const char *path);

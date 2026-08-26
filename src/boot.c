@@ -66,8 +66,11 @@ static DWORD WINAPI watchdog(LPVOID arg) {
     heap_trace_dump();
     hdr_write_dump();
     chain_break_dump();
+    { extern void int_vec_dump(void); int_vec_dump(); }
+    { extern void mouse_fn_dump(void); mouse_fn_dump(); }
 
     recomp_dump_misses("work/dino_misses.txt");
+    { extern void dump_vectors(const char *); dump_vectors("work/dino_vectors.txt"); }
     _exit(3);
 }
 #endif
@@ -107,8 +110,11 @@ int main(int argc, char **argv) {
     heap_trace_dump();
     hdr_write_dump();
     chain_break_dump();
+    { extern void int_vec_dump(void); int_vec_dump(); }
+    { extern void mouse_fn_dump(void); mouse_fn_dump(); }
 
     if (vga_window_pump()) { puts("window open - Esc or close it to exit"); vga_window_wait(); }
     recomp_dump_misses("work/dino_misses.txt");
+    { extern void dump_vectors(const char *); dump_vectors("work/dino_vectors.txt"); }
     return 0;
 }

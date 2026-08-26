@@ -368,6 +368,25 @@ def main():
     # thousands of calls land mid-function. Anything a far call points at is a
     # function entry by definition -- register the ones that are real
     # instruction boundaries.
+    # Interrupt handlers the guest installed on a previous run. The address is
+    # computed at run time, so nothing static finds it, and the analyzer wants a
+    # Borland prologue that a handler does not have. Missing the INT 8 entry is
+    # why the timer never ran and the game sat in its main loop with the clock
+    # stopped.
+    n_vec = 0
+    vec_path = os.path.join(ROOT, "work", "dino_vectors.txt")
+    if os.path.exists(vec_path):
+        for line in open(vec_path):
+            line = line.strip()
+            if not line:
+                continue
+            t = int(line, 16)
+            if t not in starts and t not in forced_targets and valid_boundary(t):
+                forced_targets.add(t)
+                n_vec += 1
+    if n_vec:
+        print(f"  installed interrupt handlers promoted to functions: {n_vec}")
+
     n_init = 0
     for t in sorted(init_list_targets(data, first_det)):
         if t not in starts and t not in forced_targets and valid_boundary(t):
