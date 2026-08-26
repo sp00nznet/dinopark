@@ -479,10 +479,27 @@ int dino_load_image(CPU *cpu, const char *path) {
     cpu->mem[psp + 0x2C] = ENV_SEG & 0xFF; cpu->mem[psp + 0x2D] = ENV_SEG >> 8; /* env seg */
     cpu->mem[psp + 0x80] = 0;                                          /* cmdline len 0 */
     cpu->mem[psp + 0x81] = 0x0D;
-    /* environment: empty (double null) + count(1) + program path */
-    cpu->mem[env + 0] = 0; cpu->mem[env + 1] = 0;
-    cpu->mem[env + 2] = 1; cpu->mem[env + 3] = 0;
-    memcpy(&cpu->mem[env + 4], "C:\\DINOPARK\\DINOPARK.EXE", 24);
+    /* Environment block. DOS lays it out as NAME=VALUE strings, a double NUL,
+     * a word count, then the program's full pathname -- which is how a program
+     * finds its own directory, and how DinoPark builds the path to dino.cfg.
+     * The path has to be NUL-terminated or that parse runs into whatever
+     * follows it. */
+    static const char *const envv[] = {
+        "COMSPEC=C:\\COMMAND.COM",
+        "PATH=C:\\DOS",
+        "PROMPT=$p$g",
+    };
+    static const char progpath[] = "C:\\DINOPARK\\DINOPARK.EXE";
+    memset(&cpu->mem[env], 0, 0x400);
+    uint32_t e = env;
+    for (size_t i = 0; i < sizeof envv / sizeof *envv; i++) {
+        size_t n = strlen(envv[i]) + 1;
+        memcpy(&cpu->mem[e], envv[i], n);
+        e += n;
+    }
+    cpu->mem[e++] = 0;                        /* terminating empty string */
+    cpu->mem[e++] = 1; cpu->mem[e++] = 0;     /* one trailing string follows */
+    memcpy(&cpu->mem[e], progpath, sizeof progpath);   /* sizeof: keeps the NUL */
 
     /* MZ initial register state (image space); DOS enters with DS=ES=PSP */
     cpu->cs = LOADSEG;  cpu->ip = 0;                      /* CS:IP = 0000:0000 */

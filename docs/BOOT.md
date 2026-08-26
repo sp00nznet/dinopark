@@ -262,70 +262,81 @@ call targets are carved into their own functions -- a target below `first_det`
 has no containing detected function, so `valid_boundary` could never accept one
 and four of them were becoming stubs that swallowed `_exit`'s frame.
 
-### Where it stops now, and the harness that pins it there
+### Borrowing civ's answer: override the C runtime
 
-The boot is clean -- no corruption, no spurious output -- and it terminates the
-way the program asks to:
+civ hit this same wall and its commit log says what worked -- *"Hand-implement
+fopen/fclose ... bypassing broken CRT internal allocation"*, and later *"Fix FILE
+struct corruption by moving state off DS"*. Some C-runtime routines are more
+trouble lifted than rewritten.
+
+`lift_full.py` has an `OVERRIDES` table now: listed functions are skipped by the
+lifter and implemented natively in `src/recomp/dino_impl.c`, keeping their
+`fn_XXXXX` names so callers and the dispatch table are unchanged. Three so far:
+
+| function | why |
+|---|---|
+| `fn_05BE8` | `sprintf`. The Borland printf core reads its format from the wrong segment however it is driven. |
+| `fn_02FA6` | `_setargv`. Returns through a computed `jmp` and leaves DS on the PSP; the game takes no arguments. |
+| `fn_00419` | Miles driver load. The `.COM` driver is a separate binary we do not lift, and a zero handle makes the game quit. |
+
+`src/test_sprintf.c` (`scriptsuild_test.ps1 sprintf`) drives one lifted
+function directly, which turned a whole boot into a one-second test and is how
+the sprintf replacement was validated.
+
+### The `_INIT_` table, read statically
+
+The startup walks a linker-built list of `{flag, priority, far ptr}` records and
+calls each. Nothing else references those routines, so recursive descent never
+reaches them -- they had only ever been found by the convergence loop's runtime
+misses, which meant deleting `work/dino_misses.txt` silently un-registered them.
+
+That mattered far more than it sounds. The first record is the routine that
+walks Borland's stream table marking every slot free (`FILE.fd = 0xFF` at
+`DGROUP:0x7630 + i*0x14 + 4`). Without it `_getstream` finds no free slot, every
+`fopen` returns NULL, and the game reports `dino.cfg: file not Found` and quits.
+
+`init_list_targets()` now reads the table out of the image, taking its bounds
+from the startup code itself rather than hardcoding them:
 
 ```
-attr 'product.pf' -> exists     open 'product.pf' -> ok
-attr 'dino.cfg'   -> exists     INT 10h set mode 03     exit code 0
+mov dx, DGROUP        (image offset 0)
+mov si, _INIT_        mov di, _INITEND
 ```
 
-It quits **on purpose**, in its sound-configuration path. `fn_0C6A6` is the
-config-file locator: it builds a path in a stack buffer, tests it, and on
-failure formats one of
+All six entries are recovered: `1C0F 25BB 26D4 2FA6 30CF 6467`.
+
+Also fixed: the environment block. `memcpy(&mem[env+4], "C:\DINOPARK\DINOPARK.EXE", 24)`
+copied exactly 24 characters -- the string's full length -- so the **terminating
+NUL was never written**, and the program path a DOS program parses to find its
+own directory ran on into whatever followed. That is where the stray `=` in
+`=dino.cfg` came from. The block is built properly now, with real variables, the
+double NUL, the count word, and a terminated path.
+
+### Where it stops now
+
+The boot reads its configuration and reaches graphics in the real flow:
 
 ```
-DGROUP:3EC5   "Unable to create configuration file '%s'."
-DGROUP:57D9   "%s: file not Found"
+open 'product.pf' -> ok      open 'dino.cfg' -> ok
+INT 10h set mode 13
+open 'SBPFM.ADV' -> ok       open 'MIDPAK.AD' -> ok      open 'MIDPAK.COM' -> ok
 ```
 
-What is left on the stack at exit is `": file not Found"` -- an **empty `%s`**.
-So the failure is in the formatting itself, not in the file logic.
+It no longer exits -- the watchdog is what stops it -- and it is bringing up the
+full Miles audio stack. It has not drawn yet: `work/vga_exit.bmp` is still black.
 
-That runs through `fn_05BE8` (`sprintf`) into `fn_01DBD`, the printf core whose
-format dispatch is the 24-entry switch. `src/test_sprintf.c` drives it directly:
+Open:
 
-```
-scriptsuild_test.ps1 sprintf                        # default format
-scriptsuild_test.ps1 sprintf DINOPARK.EXE "%s!" HI  # or your own
-```
-
-One second instead of a whole boot, and it reproduces the real failure exactly.
-Its current verdict:
-
-```
-fmt  = %s: file not Found
-arg  = DINO.CFG
-out  = "cvbnm,./!@#$%^&*()_+ QWERTYUIOP{}"
-FAIL: %s produced nothing
-```
-
-The output is a keyboard-layout table that lives at **DGROUP:0x0100** -- and it
-is byte-identical whatever format string is passed, including one with no `%s`
-in it at all. So the core is not reading the caller's format; it is reading a
-fixed address, with the right offset and the wrong segment.
-
-The calling convention is **not** the problem, which is worth recording so the
-next pass does not re-derive it:
-
-- `fn_01DBD` is a NEAR function. Its epilogue is at `0x2248`,
-  `pop di / pop si / mov sp, bp / pop bp / ret 0x0C`, and the jump table starts
-  immediately after it at `0x2250` -- which is why the analyzer's linear decode
-  runs off into nonsense past that point, and why the detected end (`0x2280`) is
-  too generous.
-- `fn_05BE8` calls it with `E8` -- a near call, no `push cs` -- and the lifter
-  pushes the matching 2-byte sentinel. `ret 0x0C` clears the twelve bytes of
-  arguments it pushes.
-- The frame therefore has arg1 at `[bp+4]`, and `les si, [bp+6]` at `0x1E2D`
-  loads the format far pointer into `ES:SI` correctly.
-- The `les` lift itself reads both words through temps before writing either
-  register, which is right.
-
-So: correct convention, correct frame, correct `les`, and the wrong segment ends
-up in ES anyway. That is the next thing to chase, and the harness makes each
-attempt cost a second.
+- **The loaded drivers cannot be called.** `SBPRO.COM`, `MIDPAK.COM` and friends
+  are separate 16-bit binaries the game loads and jumps into; the dispatch goes
+  to addresses like `603E:0200` and `650E:0200` and misses. `fn_00419` reports
+  success so the game continues, but everything downstream of a real driver is
+  absent. Stubbing Miles at the AIL entry points is the honest fix.
+- **`fn_0CCD7`** returns with SP 31352 bytes high under `-DDINO_SPCHECK`. It is
+  another of the switch functions, and it is the next thing the audit names.
+- The audit build and the plain build diverge here -- the plain one runs on, the
+  audit one trips the stack check -- so trust the plain build for behaviour and
+  the audit only for naming the function.
 
 ## The segment map
 

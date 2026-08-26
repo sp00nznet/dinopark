@@ -10,7 +10,7 @@ $rest  = if ($args.Count -gt 1) { $args[1..($args.Count-1)] } else { @() }
 if (-not (Test-Path "src\recomp\gen\recomp_000.c")) { python tools\lift_full.py | Out-Null }
 
 $vcvars = "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
-$srcs = @("src\test_$which.c","src\recomp\cpu.c","src\recomp\runtime16.c","src\recomp\video.c")
+$srcs = @("src\test_$which.c","src\recomp\cpu.c","src\recomp\runtime16.c","src\recomp\dino_impl.c","src\recomp\video.c")
 $srcs += (Get-ChildItem "src\recomp\gen\recomp_*.c" | ForEach-Object { $_.FullName })
 New-Item -ItemType Directory -Force work\obj2 | Out-Null
 Remove-Item "work\test_$which.exe" -ErrorAction SilentlyContinue

@@ -25,7 +25,75 @@ EXE = os.path.join(ROOT, "original", "DINOPARK.EXE")
 OUT = os.path.join(ROOT, "src", "recomp", "gen")
 CHUNK = 60
 SPCHECK = os.environ.get("DINO_SPCHECK") == "1"   # wrap each fn to audit its SP delta
+
+# Functions we implement natively in src/recomp/dino_impl.c instead of lifting.
+# Some C-runtime routines are more trouble lifted than rewritten -- civ reached
+# the same conclusion about its own CRT. They stay in the dispatch table and
+# keep their fn_XXXXX names, so callers and indirect dispatch are unchanged.
+OVERRIDES = {
+    0x05BE8: 'sprintf -- the Borland printf core reads its format from the'
+             ' wrong segment however it is driven (see src/test_sprintf.c)',
+    0x00419: 'Miles driver load -- the .COM driver is a separate binary we do'
+             ' not lift, and a zero handle makes the game quit',
+    0x02FA6: '_setargv -- returns through a computed jmp and leaves DS on the'
+             ' PSP; the game takes no command-line arguments',
+}
 ENTRY_IMG = 0x0000                 # CS:IP = 0000:0000 -> image offset 0
+
+
+def init_list_targets(data, first_det):
+    """Entry points named only by Borland's _INIT_ table.
+
+    The startup walks a linker-built list of 6-byte records --
+    {flag, priority, far ptr} -- and calls each one. Nothing else in the
+    program references them, so recursive descent never reaches them and they
+    surface as runtime dispatch misses. That matters more than it sounds:
+    the first record is the routine that marks Borland's stream table free,
+    and without it every fopen in the game returns NULL.
+
+    The startup names the table itself --
+        mov dx, DGROUP      (image offset 0)
+        mov si, _INIT_      mov di, _INITEND
+    -- so read the bounds out of the code rather than hardcoding them.
+    """
+    from decode16 import Decoder, OpType
+    try:
+        insns = Decoder(data[HDR:first_det + HDR], base_offset=0).decode_all()
+    except Exception:
+        return set()
+
+    dgroup = si = di = None
+    for ins in insns:
+        o1, o2 = ins.op1, ins.op2
+        if ins.mnemonic != 'mov' or not o1 or o1.type != OpType.REG16:
+            continue
+        if not o2 or o2.type not in (OpType.IMM8, OpType.IMM16):
+            continue
+        reg = repr(o1)
+        if reg == 'dx' and dgroup is None:
+            dgroup = o2.disp            # the first `mov dx, imm` is DGROUP
+        elif reg == 'si' and di is None:   # keep the first complete si/di pair
+            si = o2.disp
+        elif reg == 'di' and si is not None and di is None:
+            di = o2.disp
+
+    if dgroup is None or si is None or di is None or not (si < di):
+        return set()
+    if (di - si) % 6:                   # records are 6 bytes; anything else
+        return set()                    # is not the table we are looking for
+
+    out = set()
+    base = dgroup * 16
+    for a in range(base + si, base + di, 6):
+        rec = data[a + HDR:a + HDR + 6]
+        if len(rec) < 6:
+            break
+        off = int.from_bytes(rec[2:4], 'little')
+        seg = int.from_bytes(rec[4:6], 'little')
+        t = (seg * 16 + off) & 0xFFFFF
+        if 0 < t < base:                # must land in code, not in data
+            out.add(t)
+    return out
 
 
 def jump_tables(data, insns, cs, offs):
@@ -229,6 +297,14 @@ def main():
     # thousands of calls land mid-function. Anything a far call points at is a
     # function entry by definition -- register the ones that are real
     # instruction boundaries.
+    n_init = 0
+    for t in sorted(init_list_targets(data, first_det)):
+        if t not in starts and t not in forced_targets and valid_boundary(t):
+            forced_targets.add(t)
+            n_init += 1
+    if n_init:
+        print(f"  _INIT_ table entries promoted to functions: {n_init}")
+
     n_farfix = n_nearfix = 0
     for s in sorted(starts):
         try:
@@ -290,8 +366,14 @@ def main():
     bodies, all_calls, lifted, n_wrapped = [], set(), 0, 0
     segs_used = set()
     wrappers = []
+    names_overridden = set()
     n_arms = 0
     for name, io, end in funcs:
+        if io in OVERRIDES:
+            segs_used.add(cs_of(io))
+            print(f"  native override: {name}  ({OVERRIDES[io]})")
+            names_overridden.add(name)
+            continue
         fstart, fend = io + HDR, end + HDR
         cs = cs_of(io)
         segs_used.add(cs)
@@ -351,6 +433,7 @@ def main():
             bodies.append(f"/* {name}: lift failed: {e} */\nvoid {name}(CPU*cpu){{(void)cpu;}}")
 
     names = [n for n, _, _ in funcs]
+    lifted_names = [n for n in names if n not in names_overridden]
     nameset = set(names)
     stubs = sorted(c for c in all_calls if c not in nameset)
 
@@ -380,7 +463,7 @@ def main():
         if SPCHECK:
             f.write("void recomp_sp_check(unsigned addr, unsigned sp0, unsigned sp1, unsigned bp0, unsigned bp1);\n")
             f.write("void recomp_push(unsigned addr);\n")
-            for n in names:
+            for n in lifted_names:
                 f.write(f"void {n}__body(CPU *cpu);\n")
         for n in names:
             f.write(f"void {n}(CPU *cpu);\n")

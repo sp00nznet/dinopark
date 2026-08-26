@@ -6,7 +6,7 @@ Set-Location $root
 
 python tools\lift_full.py | Out-Null
 
-$srcs = @("src\boot.c", "src\recomp\cpu.c", "src\recomp\runtime16.c")
+$srcs = @("src\boot.c", "src\recomp\cpu.c", "src\recomp\runtime16.c","src\recomp\dino_impl.c")
 $srcs += (Get-ChildItem "src\recomp\gen\recomp_*.c" | ForEach-Object { $_.FullName })
 
 $vcvars = "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
