@@ -118,12 +118,13 @@ in parallel — see [`docs/FORMATS.md`](docs/FORMATS.md) (WIP).
 
 ## Status
 
-🚧 **Phase 6 — it runs. The intro plays, the park animates, and it takes input.**
+🎮 **Phase 6 — it plays.**
 
-From a dusty 1993 floppy to a native executable that runs its real Borland
-startup, plays its whole credit sequence, reaches its attract mode with the park
-animating and the credits rolling, and answers the keyboard and mouse — no
-emulator, no copyrighted bytes in this repo.
+From a dusty 1993 floppy to a native executable you can sit down in front of.
+It runs its real Borland startup, plays its whole credit sequence, opens the
+park, and answers the mouse: click, and the bank approves your $5,000 loan.
+Main street, the Real Estate office, the notice board, the General Ledger — the
+game, running as native code. No emulator, no copyrighted bytes in this repo.
 
 - ✅ Rights situation researched (see below) — abandonware; **no game files shipped here**.
 - ✅ Binary triaged: unpacked Borland-C 16-bit DOS exe, **large model**, Miles audio.
@@ -195,8 +196,25 @@ emulator, no copyrighted bytes in this repo.
   - **The timer interrupt never ran.** DinoPark hooks INT 8 and drives itself
     from it. The main loop ran, polled the mouse twenty million times, drew its
     cursor, and nothing else ever happened, because for the game no time passed.
-- ⏭️ **Next:** the attract loop does not yet hand over to the game proper — find
-  what ends it. Then sound (the AIL calls are answered, not played), and saving.
+- 🎮 **It plays.** What looked like an attract loop was the game itself: that
+  park screen is the play view, the grey panels are its controls, and a click
+  starts a park. Two instruments found it, and both stayed:
+  - **`DINO_STATEWORD`** reports a DGROUP word whenever it changes. `fn_0CDDB`
+    is the top-level state machine — `mov bx,[3C5C] / cmp bx,0x14 /
+    jmp cs:[bx+8AB]`, twenty-one states through a jump table — and watching that
+    word showed the game parked at `0xFFFF`, which means "this screen is still
+    running", waiting for something to change it.
+  - **A call histogram** over the SPCHECK instrumentation: which functions ran
+    and how often. "Nothing changes" says nothing about *why*; this separates a
+    handler that ran and decided nothing from one never reached at all. Diffing
+    an idle run against one clicking a grid named the forty-six functions on the
+    click path — three of them state-writers.
+  Two more game screens turned out to be dispatching to empty stubs, rejected as
+  function entries because the containing function embeds data the linear decode
+  desynchronises on. Their bytes are `39 26 E4 3D 77` — Borland's stack probe,
+  which appears nowhere but an entry. Unresolved stubs: 7 → 2.
+- ⏭️ **Next:** sound (the AIL calls are answered, not played), saving and
+  loading, and a play-through long enough to find what breaks next.
 
 ---
 
