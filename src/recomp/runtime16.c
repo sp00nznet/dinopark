@@ -357,6 +357,45 @@ static const uint8_t *vga_frame(CPU *cpu)
     return g_compose;
 }
 
+/* Keep the most picture-like frame the game ever shows.
+ *
+ * Sampling only at exit catches whatever the last clear left behind -- a solid
+ * fill, in practice. A frame is worth keeping if it uses a lot of distinct
+ * indices, which a cleared screen does not, so track the best seen and write
+ * that at the end alongside the palette in force. */
+static uint8_t g_best_frame[VGA_W * VGA_H];
+static uint8_t g_best_pal[768];
+static int g_best_distinct;
+
+void vga_sample(CPU *cpu)
+{
+    if (!cpu || !cpu->mem) return;
+    const uint8_t *f = vga_frame(cpu);
+    int seen[256]; memset(seen, 0, sizeof seen);
+    int distinct = 0;
+    for (int i = 0; i < VGA_W * VGA_H; i += 3)
+        if (!seen[f[i]]) { seen[f[i]] = 1; distinct++; }
+    if (distinct <= g_best_distinct) return;
+    g_best_distinct = distinct;
+    memcpy(g_best_frame, f, sizeof g_best_frame);
+    memcpy(g_best_pal, g_palette, sizeof g_best_pal);
+}
+
+void vga_best_dump(const char *path)
+{
+    if (g_best_distinct < 2) {
+        fprintf(stderr, "[best] no frame with any variety was ever shown\n");
+        return;
+    }
+    fprintf(stderr, "[best] richest frame seen used %d distinct indices -> %s\n",
+            g_best_distinct, path);
+    vga_write_bmp(path, g_best_frame, VGA_W, VGA_H, g_best_pal);
+    FILE *r = fopen("work/best_frame.raw", "wb");
+    if (r) { fwrite(g_best_frame, 1, sizeof g_best_frame, r); fclose(r); }
+    r = fopen("work/best_frame.pal", "wb");
+    if (r) { fwrite(g_best_pal, 1, sizeof g_best_pal, r); fclose(r); }
+}
+
 void vga_flush(CPU *cpu)
 {
     if (!g_vga_live) return;
@@ -730,6 +769,12 @@ static void int21(CPU *cpu) {
               for (int i = 0; i < g_stk_depth && i < 40; i++)
                   fprintf(stderr, "    fn_%05X\n", g_stk[i]); }
 #endif
+            /* The last frame is usually a clear; the interesting one is
+             * whatever had the most colour in it. */
+            vga_best_dump("work/best_frame.bmp");
+            /* The game composes offscreen and may never blit, so also go
+             * looking for a picture-shaped buffer in RAM. */
+            fb_scan(cpu, "work/fb_scan.bmp");
             vga_snapshot(cpu, "work/vga_exit.bmp");
             fflush(stdout); fflush(stderr);
             exit(cpu->al);

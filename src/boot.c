@@ -36,6 +36,7 @@ static DWORD WINAPI bios_clock(LPVOID unused)
             p[0] = (uint8_t)t;         p[1] = (uint8_t)(t >> 8);
             p[2] = (uint8_t)(t >> 16); p[3] = (uint8_t)(t >> 24);
         }
+            vga_sample(g_cpu);
         Sleep(55);                      /* 18.2 Hz */
     }
 }
@@ -55,6 +56,7 @@ static DWORD WINAPI watchdog(LPVOID arg) {
 #endif
     fflush(stderr);
     if (g_cpu) vga_snapshot(g_cpu, "work/vga_exit.bmp");
+    vga_best_dump("work/best_frame.bmp");
     if (g_cpu) fb_scan(g_cpu, "work/fb_scan.bmp");
     if (g_cpu) heap_dump(g_cpu);
     if (g_cpu) find_signature(g_cpu, "UNC2");
@@ -93,6 +95,7 @@ int main(int argc, char **argv) {
     /* Whatever the game drew, keep it: a headless run has no window to look at
      * and the framebuffer is the only evidence it drew at all. */
     vga_snapshot(&cpu, "work/vga_exit.bmp");
+    vga_best_dump("work/best_frame.bmp");
     fb_scan(&cpu, "work/fb_scan.bmp");
     heap_dump(&cpu);
     find_signature(&cpu, "UNC2");

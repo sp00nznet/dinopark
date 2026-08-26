@@ -510,17 +510,46 @@ The relevant code is its move-and-merge path:
 ```
 
 Whether the defect is in our lift of that arithmetic or in the state it is
-handed is the next question, and it is now a small one: the routine is 450 bytes
-and the exact store that goes wrong is identified.
+handed is still open. But the compactor can be *tested* rather than argued
+about: it is an optimisation, the game was handed 324 KB, and the chain shows a
+0x2300-paragraph free block, so there should be room to go on without it.
+`fn_2F0C3` is overridden to do nothing, as a probe.
 
-Diagnostics available for it, all opt-in and all observational:
+The answer is unambiguous. With compaction disabled the boot goes from stopping
+at `btns.act` to running the whole opening sequence:
 
-| switch | what it reports |
-|---|---|
-| `DINO_HEAPTRACE=1` | the block sequence walked, and writes to size fields |
-| `DINO_WATCH=<hex>` | the first eight writes to one linear address, with the call stack for the first |
-| `-DDINO_SPCHECK` | per-function SP/BP audit and a live call stack |
-| `heap_dump` / `find_signature` / `find_block_size` | chain snapshot, locate a loaded asset, locate a header by size |
+```
+open 'blueprnt.act' -> ok     open 'credits.pic'  -> ok
+open 'mecc.act'     -> ok     open 'meccharp.abt' -> ok
+[VGA] UNCHAINED (Mode X)
+[fb]  DAC palette programmed
+[vga] 64000 of 64000 pixels non-zero (Mode X)
+```
+
+The MECC logo, the credits screen, the blueprint art and the MECC harp sting --
+DinoPark's intro. It programs the DAC, and it writes a full screen through the
+Mode X plane path. So the compactor was the only thing standing between the
+runtime and the game's own intro, and everything under it works.
+
+### Where it stops now
+
+It still does not show a picture. Two things are true at once:
+
+- The frame is **uniform**. `vga_sample()` keeps the most colourful frame seen,
+  sampled at 18.2 Hz from the BIOS-clock thread, and reports that no frame with
+  any variety was ever displayed -- the screen is index 255 throughout. The game
+  composes offscreen and has not blitted.
+- `fb_scan()`'s best picture-shaped candidate is still loaded asset data rather
+  than a composed screen, so the offscreen buffer either is not built yet or does
+  not look like a bitmap to the scorer.
+
+And the run ends in Borland's `Stack overflow!` with exit code 120, so there is
+still an SP problem further in -- one the audit did not name earlier because the
+boot never got this far.
+
+The next questions, in order: what does the intro draw into, and why does SP go
+out of range once the sequence runs. `-DDINO_SPCHECK` will answer the second
+directly now that the code reaches it.
 
 ## The segment map
 

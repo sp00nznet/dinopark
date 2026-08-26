@@ -177,3 +177,25 @@ void fn_005E0(CPU *cpu)
     cpu->dx = 0x0000;
     cpu->sp = (uint16_t)(cpu->sp + 4);         /* retf */
 }
+
+/*
+ * The heap compactor, disabled.
+ *
+ * fn_2F0C3 is the far entry to fn_2F0CD, which walks the block chain merging
+ * free neighbours and sliding movable blocks down. It is also what breaks the
+ * chain and then hangs on it: the runtime's chain check names its own store of
+ * block 6C26's size as the last write leaving the walk unable to reach the end
+ * marker.
+ *
+ * Compaction is an optimisation. The game was handed 324 KB and the chain shows
+ * a 0x2300-paragraph free block, so there is room to go on without it. Doing
+ * nothing here is a probe: if the boot proceeds, the compactor is the only
+ * thing in the way and reimplementing or repairing it is the whole job. If the
+ * game instead fails an allocation, it genuinely needed the memory back.
+ *
+ * Takes no arguments and returns nothing; far call, so drop the 4-byte frame.
+ */
+void fn_2F0C3(CPU *cpu)
+{
+    cpu->sp = (uint16_t)(cpu->sp + 4);
+}
