@@ -157,6 +157,34 @@ static void watch_note(uint32_t addr, uint8_t val)
 #endif
 }
 
+/* Every write to a block's size field, in order. Reads tell us the walk the
+ * game performs; writes tell us the chain it believes it built, and the two
+ * diverging is the whole question. Only the low byte is recorded, which is
+ * enough to see which paragraphs were ever treated as block headers. */
+#define HWR 48
+static struct { uint16_t seg; uint8_t val; } g_hwr[HWR];
+static unsigned g_hwr_n;
+
+static void hdr_write_note(uint32_t addr, uint8_t val)
+{
+    if (g_heaptrace <= 0 || (addr & 0xF) != 2) return;
+    if (addr < (uint32_t)HEAP_LO * 16 || addr >= (uint32_t)HEAP_HI * 16) return;
+    g_hwr[g_hwr_n++ % HWR].seg = (uint16_t)((addr - 2) / 16);
+    g_hwr[(g_hwr_n - 1) % HWR].val = val;
+}
+
+void hdr_write_dump(void)
+{
+    if (g_heaptrace <= 0 || !g_hwr_n) return;
+    unsigned n = g_hwr_n < HWR ? g_hwr_n : HWR;
+    unsigned start = g_hwr_n < HWR ? 0 : g_hwr_n % HWR;
+    fprintf(stderr, "[hdrw] %u writes to +2 fields; last %u:\n", g_hwr_n, n);
+    fprintf(stderr, "[hdrw]  ");
+    for (unsigned i = 0; i < n; i++)
+        fprintf(stderr, "%04X=%02X ", g_hwr[(start + i) % HWR].seg, g_hwr[(start + i) % HWR].val);
+    fprintf(stderr, "\n");
+}
+
 static void f5_note(uint32_t addr, uint8_t val)
 {
     if (g_heaptrace < 0) g_heaptrace = getenv("DINO_HEAPTRACE") ? 1 : 0;
@@ -170,12 +198,29 @@ static void f5_note(uint32_t addr, uint8_t val)
 int recomp_mem_write8(CPU *cpu, uint32_t addr, uint8_t val)
 {
     watch_note(addr, val);
+    hdr_write_note(addr, val);
     f5_note(addr, val);
     if (addr < VGA_LOW || addr >= VGA_HIGH || g_chain4) return 0;
     uint32_t off = addr - VGA_LOW;
     for (int p = 0; p < 4; p++)
         if (g_map_mask & (1u << p)) g_plane[p][off] = val;
     return 1;
+}
+
+/* Where did an asset actually land? The container signature is the anchor:
+ * finding it says where the loader's buffer really starts, which is the one
+ * thing the block chain cannot tell us once it has walked into the data. */
+void find_signature(CPU *cpu, const char *sig)
+{
+    size_t n = strlen(sig), hits = 0;
+    for (uint32_t a = 0x400; a + n < 0xA0000u && hits < 8; a++) {
+        if (memcmp(&cpu->mem[a], sig, n)) continue;
+        hits++;
+        fprintf(stderr, "[sig] \"%s\" at %05X (segment %04X:%04X)\n",
+                sig, a, (unsigned)(a / 16), (unsigned)(a % 16));
+    }
+    if (!hits)
+        fprintf(stderr, "[sig] \"%s\" not found in guest memory\n", sig);
 }
 
 void heap_trace_dump(void)

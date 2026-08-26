@@ -57,7 +57,10 @@ static DWORD WINAPI watchdog(LPVOID arg) {
     if (g_cpu) vga_snapshot(g_cpu, "work/vga_exit.bmp");
     if (g_cpu) fb_scan(g_cpu, "work/fb_scan.bmp");
     if (g_cpu) heap_dump(g_cpu);
+    if (g_cpu) find_signature(g_cpu, "UNC2");
     heap_trace_dump();
+    hdr_write_dump();
+
     recomp_dump_misses("work/dino_misses.txt");
     _exit(3);
 }
@@ -90,7 +93,10 @@ int main(int argc, char **argv) {
     vga_snapshot(&cpu, "work/vga_exit.bmp");
     fb_scan(&cpu, "work/fb_scan.bmp");
     heap_dump(&cpu);
+    find_signature(&cpu, "UNC2");
     heap_trace_dump();
+    hdr_write_dump();
+
     if (vga_window_pump()) { puts("window open - Esc or close it to exit"); vga_window_wait(); }
     recomp_dump_misses("work/dino_misses.txt");
     return 0;

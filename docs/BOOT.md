@@ -436,16 +436,52 @@ corruption: `BTNS.ACT` contains 13,212 bytes of `0xF5` -- its transparent colour
 -- and the watch counted 13,222 `0xF5` writes into the heap. The file loads
 correctly too: 120 reads of 512 bytes for 61,041 bytes is the whole thing.
 
-So nothing here is malfunctioning in the way it first appears. The heap chain
-and the `btns.act` buffer simply **overlap**: blocks run contiguously up to
-`0x6C47`, `last` is `0x9000`, and the space between them has no block header --
-yet the game is reading asset data into `0x6C47` onwards. Either the allocator
-handed out `0x6C47` without recording a header for it, or it returned the header
-paragraph itself as the data pointer instead of the paragraph after it.
+### What is actually happening
 
-That is the question to answer next, and it is a narrow one: watch the allocator
-return value for the `btns.act` buffer and compare it against where the header
-should be.
+Block layout, from the manager itself at `0x2F0C3`:
+
+```
++0  previous block segment      +4  handle index
++2  size in paragraphs          +8  flags
+```
+
+and at `0x2F13D`, `mov si, es / inc si` -- **a block's data starts one paragraph
+after its header**. That checks out against the read trace: block 20 is at
+`6C05` with size `0x21` (header + 512 bytes) and every `btns.act` read lands at
+`6C06:0000`, exactly one paragraph on.
+
+`DINO_HEAPTRACE` records writes to `+2` fields as well as reads, and the last
+real header write in a whole run is:
+
+```
+[hdrw]  ... 3F51=06  6C26=21
+```
+
+After `6C26=21` the game **never writes another block header** -- but it keeps
+using memory, writing decoded sprite data as far as `0x7B23`. (Everything after
+that point in the trace is pixel data that happens to land on an address ending
+in 2; the filter cannot tell those apart.)
+
+So the failure is:
+
+1. The chain the game builds ends at block `6C26`, size `0x21`.
+2. The game then uses memory from `0x6C47` upward without recording blocks there.
+3. The compactor walks the chain, steps `6C26 + 0x21` to `0x6C47`, finds sprite
+   data, reads `F5F5` as a size, wraps backwards to `0x623C`, and loops forever.
+
+Corrections worth keeping, since each of these looked true and was not: the
+`0xF5` is `BTNS.ACT`'s transparent colour, not a poison or corruption; the
+repeated reads to one address are a buffered `fread` refilling its 512-byte
+buffer, and 120 of them for a 61,041-byte file is a complete, healthy load; and
+the file is not loaded at `0x6C47` at all -- the only `"UNC2"` signatures in
+memory are the constant in DGROUP and a copy of the header in a **stack** local
+at `0x3EF70`.
+
+The open question is narrow and factual: why do the allocations past `0x6C26`
+not create block headers? Most likely a second allocation path -- a high-water
+or handle-based one -- that the chain walker does not know about, or one that
+returns memory without recording it. Watching writes to the handle table at
+`ds:[0x7424]` is the next observation.
 
 ## The segment map
 
