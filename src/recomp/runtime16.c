@@ -103,8 +103,74 @@ static uint8_t g_plane[4][0x10000];
 static int g_chain4 = 1;                   /* mode 13h until told otherwise */
 static uint8_t g_read_plane;               /* Graphics reg 4: read map select */
 
+/* Watch the real walker instead of reimplementing it.
+ *
+ * fn_2F0CD reads the size word at ES:[2] of each block it visits, so every
+ * read of a linear address ending in 2 inside the heap names a block it
+ * stepped to -- in the order it actually stepped, coalescing branch included.
+ * A ring of the last 64 is enough to show the cycle it is stuck in, and costs
+ * nothing when DINO_HEAPTRACE is unset. */
+#define HSEQ 64
+static uint16_t g_hseq[HSEQ];
+static unsigned g_hseq_n;
+static unsigned long g_hseq_hits;
+static int g_heaptrace = -1;
+
+static void heap_note(uint32_t addr)
+{
+    if (g_heaptrace < 0) g_heaptrace = getenv("DINO_HEAPTRACE") ? 1 : 0;
+    if (!g_heaptrace || (addr & 0xF) != 2) return;
+    if (addr < (uint32_t)HEAP_LO * 16 || addr >= (uint32_t)HEAP_HI * 16) return;
+    g_hseq[g_hseq_n++ % HSEQ] = (uint16_t)((addr - 2) / 16);
+    g_hseq_hits++;
+}
+
+/* The block header at 6C47 ends up holding F5F5, and memory starts zeroed, so
+ * something wrote it. Record the span of 0xF5 writes landing in the heap: if a
+ * drawing routine is running off the end of its buffer, the run shows up as a
+ * contiguous range ending on top of a header. */
+static uint32_t g_f5_lo = 0xFFFFFFFFu, g_f5_hi;
+static unsigned long g_f5_n;
+
+/* Attribution. Knowing that something wrote a byte is not the same as knowing
+ * what did; DINO_WATCH=<linear hex> reports the first write to one address
+ * together with the live call stack, which under -DDINO_SPCHECK names the
+ * routine responsible. */
+static uint32_t g_watch = 0xFFFFFFFFu;
+static int g_watch_fired;
+
+static void watch_note(uint32_t addr, uint8_t val)
+{
+    static int init;
+    if (!init) {
+        init = 1;
+        const char *e = getenv("DINO_WATCH");
+        if (e) g_watch = (uint32_t)strtoul(e, NULL, 16);
+    }
+    if (addr != g_watch || g_watch_fired) return;
+    g_watch_fired = 1;
+    fprintf(stderr, "[watch] %05X written with %02X\n", addr, val);
+#ifdef DINO_SPCHECK
+    { extern unsigned g_stk[]; extern int g_stk_depth;
+      for (int i = 0; i < g_stk_depth && i < 40; i++)
+          fprintf(stderr, "[watch]     fn_%05X\n", g_stk[i]); }
+#endif
+}
+
+static void f5_note(uint32_t addr, uint8_t val)
+{
+    if (g_heaptrace < 0) g_heaptrace = getenv("DINO_HEAPTRACE") ? 1 : 0;
+    if (!g_heaptrace || val != 0xF5) return;
+    if (addr < (uint32_t)HEAP_LO * 16 || addr >= (uint32_t)HEAP_HI * 16) return;
+    if (addr < g_f5_lo) g_f5_lo = addr;
+    if (addr > g_f5_hi) g_f5_hi = addr;
+    g_f5_n++;
+}
+
 int recomp_mem_write8(CPU *cpu, uint32_t addr, uint8_t val)
 {
+    watch_note(addr, val);
+    f5_note(addr, val);
     if (addr < VGA_LOW || addr >= VGA_HIGH || g_chain4) return 0;
     uint32_t off = addr - VGA_LOW;
     for (int p = 0; p < 4; p++)
@@ -112,8 +178,25 @@ int recomp_mem_write8(CPU *cpu, uint32_t addr, uint8_t val)
     return 1;
 }
 
+void heap_trace_dump(void)
+{
+    if (g_heaptrace <= 0 || !g_hseq_hits) return;
+    fprintf(stderr, "[walk] %lu block-size reads; last %u visited, oldest first:\n",
+            g_hseq_hits, g_hseq_n < HSEQ ? g_hseq_n : HSEQ);
+    unsigned n = g_hseq_n < HSEQ ? g_hseq_n : HSEQ;
+    unsigned start = g_hseq_n < HSEQ ? 0 : g_hseq_n % HSEQ;
+    fprintf(stderr, "[walk]  ");
+    for (unsigned i = 0; i < n; i++)
+        fprintf(stderr, "%04X ", g_hseq[(start + i) % HSEQ]);
+    fprintf(stderr, "\n");
+    if (g_f5_n)
+        fprintf(stderr, "[walk] %lu 0xF5 writes into the heap, %05X..%05X (segments %04X..%04X)\n",
+                g_f5_n, g_f5_lo, g_f5_hi, (unsigned)(g_f5_lo / 16), (unsigned)(g_f5_hi / 16));
+}
+
 int recomp_mem_read8(CPU *cpu, uint32_t addr, uint8_t *out)
 {
+    heap_note(addr);
     if (addr < VGA_LOW || addr >= VGA_HIGH || g_chain4) return 0;
     *out = g_plane[g_read_plane & 3][addr - VGA_LOW];
     return 1;
@@ -444,6 +527,8 @@ static void int21(CPU *cpu) {
         case 0x3F: {                                 /* read */
             int fh = cpu->bx; uint16_t n = cpu->cx; uint32_t buf = seg_off(cpu->ds, cpu->dx);
             size_t got = (fh >= 0 && fh < MAXFH && g_fh[fh]) ? fread(&cpu->mem[buf], 1, n, g_fh[fh]) : 0;
+            trace("[INT21] read fh=%d %u bytes -> %04X:%04X (linear %05X..%05X)\n",
+                  fh, n, cpu->ds, cpu->dx, buf, buf + (unsigned)got);
             cpu->ax = (uint16_t)got; cpu->flags &= ~FLAG_CF; break;
         }
         case 0x42: {                                 /* lseek */

@@ -402,32 +402,50 @@ starts as zeroed memory -- so either the block headers are never written, or
 they are written somewhere other than where this walker looks. `ds:[0x742A]` and
 `ds:[0x742E]` are its bounds and are the first things to print.
 
-`heap_dump()` prints those bounds and walks the chain. What it shows:
+Three diagnostics answer this without reimplementing anything the game does,
+which is where several wrong conclusions came from:
+
+- **`heap_dump()`** prints the walker's bounds and follows the chain. Read its
+  tail with care -- the real walker only advances by `size` when bit 7 of the
+  flag byte at `[es:8]` is set, and branches into a coalescing path otherwise,
+  so this dump stops being faithful at the first `flags=00` block.
+- **`DINO_HEAPTRACE=1`** records the block sequence the game *actually* walks,
+  by noting every read of a linear address ending in 2 inside the heap. No
+  modelling, just observation.
+- **`DINO_WATCH=<linear hex>`** reports the first write to one address along
+  with the live call stack, which under `-DDINO_SPCHECK` names the routine.
+
+What they show:
 
 ```
-[heap] first=400B last=9000 (we handed out 3F10..9000)
-[heap]   blk  0 @400B size=0011 flags=A0
-[heap]   blk  1 @401C size=1070 flags=A0
-...
-[heap]   blk 20 @6C05 size=0021 flags=00
-[heap]   blk 21 @6C26 size=0021 flags=00
-[heap] 24 blocks, stopped at E582: hit a zero-size block
+[walk] 400B 401C 508C ... 6BED 6C05 6C26 6C47 623C   then back to 400B, forever
 ```
 
-The bounds are right and the first twenty blocks chain cleanly with sensible
-sizes, so the heap is not obviously broken. Read the tail with care, though:
-the real walker only advances by `size` when the flag byte at `[es:8]` has bit 7
-set, and with it clear it branches into a coalescing path instead. Blocks 20 and
-21 are the first with `flags=00`, which is exactly where this dump stops being
-faithful -- everything it prints after that is its own confusion rather than
-evidence of corruption. (An early guess that the `0xF5` bytes past that point
-were an allocator poison was wrong: `0xF5` is loaded at fifteen sites, all in
-drawing code, so it is a colour or sentinel value.)
+The chain reaches `0x6C47`, reads `F5F5` as a size, and `0x6C47 + 0xF5F5` wraps
+to `0x623C` -- backwards, into the middle of the heap, and round again. That is
+the hang.
 
-So the next step is to model that coalescing branch faithfully, or trace the
-real walker, before concluding anything about the chain past block 20. This is
-the handle-based allocator the original roadmap called out as step 1 on the road
-to interactive.
+`DINO_WATCH=6C472` names who put `F5` there:
+
+```
+fn_00000 fn_0C6A6 fn_0CDDB fn_0D885 fn_0E4CB fn_0E359 fn_19767 fn_04591 fn_0449D
+```
+
+`fn_19767` is `fread(ptr, size, nmemb, stream)`. So that is **file data**, not
+corruption: `BTNS.ACT` contains 13,212 bytes of `0xF5` -- its transparent colour
+-- and the watch counted 13,222 `0xF5` writes into the heap. The file loads
+correctly too: 120 reads of 512 bytes for 61,041 bytes is the whole thing.
+
+So nothing here is malfunctioning in the way it first appears. The heap chain
+and the `btns.act` buffer simply **overlap**: blocks run contiguously up to
+`0x6C47`, `last` is `0x9000`, and the space between them has no block header --
+yet the game is reading asset data into `0x6C47` onwards. Either the allocator
+handed out `0x6C47` without recording a header for it, or it returned the header
+paragraph itself as the data pointer instead of the paragraph after it.
+
+That is the question to answer next, and it is a narrow one: watch the allocator
+return value for the `btns.act` buffer and compare it against where the header
+should be.
 
 ## The segment map
 

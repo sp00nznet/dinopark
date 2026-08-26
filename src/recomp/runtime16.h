@@ -41,6 +41,7 @@ void vga_flush(CPU *cpu);
 void vga_snapshot(CPU *cpu, const char *path);
 void fb_scan(CPU *cpu, const char *path);   /* find an offscreen framebuffer */
 void heap_dump(CPU *cpu);        /* the game's own heap chain */
+void heap_trace_dump(void);      /* the walk the game actually performed */
 void text_snapshot(CPU *cpu);    /* dump the 80x25 text screen */
 void stack_message_scan(CPU *cpu);   /* strings left on the guest stack */
 
