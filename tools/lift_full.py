@@ -593,6 +593,7 @@ def main():
         if SPCHECK:
             f.write("void recomp_sp_check(unsigned addr, unsigned sp0, unsigned sp1, unsigned bp0, unsigned bp1);\n")
             f.write("void recomp_push(unsigned addr);\n")
+            f.write("void call_hist_dump(const char *path);\n")
             for n in lifted_names:
                 f.write(f"void {n}__body(CPU *cpu);\n")
         for n in names:
@@ -686,7 +687,35 @@ void dispatch_far(CPU *cpu, unsigned seg, unsigned off) {
  * the watchdog fires is the chain that never returned. */
 #define MAXSTK 512
 unsigned g_stk[MAXSTK]; int g_stk_depth;
+/* Which functions ran, and how many times.
+ *
+ * "The screen never changes" says nothing about why. A call histogram does:
+ * it separates a handler that ran and decided nothing from one that was never
+ * reached at all. Open-addressed on the function's own address; the table is
+ * sized well past the ~900 functions a lift produces, so it never fills. */
+#define CALLHIST 4096
+static unsigned g_ch_addr[CALLHIST];
+static unsigned long g_ch_n[CALLHIST];
+
+static void call_note(unsigned addr) {
+    unsigned i = (addr * 2654435761u) % CALLHIST;
+    for (unsigned k = 0; k < CALLHIST; k++) {
+        unsigned j = (i + k) % CALLHIST;
+        if (g_ch_n[j] && g_ch_addr[j] != addr) continue;
+        g_ch_addr[j] = addr; g_ch_n[j]++; return;
+    }
+}
+
+void call_hist_dump(const char *path) {
+    FILE *f = fopen(path, "w");
+    if (!f) return;
+    for (unsigned j = 0; j < CALLHIST; j++)
+        if (g_ch_n[j]) fprintf(f, "%05X %lu\\n", g_ch_addr[j], g_ch_n[j]);
+    fclose(f);
+}
+
 void recomp_push(unsigned addr) {
+    call_note(addr);
     if (g_stk_depth < MAXSTK) g_stk[g_stk_depth] = addr;
     g_stk_depth++;
 }

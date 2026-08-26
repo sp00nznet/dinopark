@@ -69,6 +69,9 @@ static DWORD WINAPI watchdog(LPVOID arg) {
     { extern void int_vec_dump(void); int_vec_dump(); }
     { extern void mouse_fn_dump(void); mouse_fn_dump(); }
 
+#ifdef DINO_SPCHECK
+    { extern void call_hist_dump(const char *); call_hist_dump("work/dino_calls.txt"); }
+#endif
     recomp_dump_misses("work/dino_misses.txt");
     { extern void dump_vectors(const char *); dump_vectors("work/dino_vectors.txt"); }
     _exit(3);
@@ -114,6 +117,9 @@ int main(int argc, char **argv) {
     { extern void mouse_fn_dump(void); mouse_fn_dump(); }
 
     if (vga_window_pump()) { puts("window open - Esc or close it to exit"); vga_window_wait(); }
+#ifdef DINO_SPCHECK
+    { extern void call_hist_dump(const char *); call_hist_dump("work/dino_calls.txt"); }
+#endif
     recomp_dump_misses("work/dino_misses.txt");
     { extern void dump_vectors(const char *); dump_vectors("work/dino_vectors.txt"); }
     return 0;

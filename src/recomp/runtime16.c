@@ -170,6 +170,45 @@ static void watch_note(uint32_t addr, uint8_t val)
 #endif
 }
 
+/* DINO_STATEWORD=<DGROUP offset>: report a game variable every time it changes.
+ *
+ * fn_0CDDB is the top-level state machine -- `mov bx,[3C5C] / cmp bx,0x14 /
+ * jmp cs:[bx+8AB]`, twenty-one states through a jump table -- so watching that
+ * one word says which screen the game thinks it is on, and which transitions it
+ * is and is not making. Reported on change rather than on write: a 16-bit store
+ * arrives as two bytes and the halfway value is not a state. */
+static uint16_t g_sw_off, g_sw_last;
+static int g_sw_on = -1, g_sw_n;
+
+static void stateword_note(CPU *cpu, uint32_t addr, uint8_t val)
+{
+    if (g_sw_on < 0) {
+        const char *e = getenv("DINO_STATEWORD");
+        g_sw_on = e != NULL;
+        if (e) g_sw_off = (uint16_t)strtoul(e, NULL, 16);
+        g_sw_last = 0xFFFF;
+    }
+    if (!g_sw_on || !g_dgroup || g_sw_n > 400) return;
+    uint32_t want = seg_off(g_dgroup, g_sw_off);
+    if (addr != want && addr != want + 1) return;
+    /* The value this write produces, not the one in memory: the hook runs
+     * before the byte lands, so reading it back reports each 16-bit store one
+     * byte behind and every transition arrives looking like a half-value. */
+    uint16_t v = mem_read16(cpu, g_dgroup, g_sw_off);
+    v = (addr == want) ? (uint16_t)((v & 0xFF00) | val)
+                       : (uint16_t)((v & 0x00FF) | (val << 8));
+    if (v == g_sw_last) return;
+    g_sw_last = v;
+    g_sw_n++;
+    fprintf(stderr, "[state] %04X = %04X", g_sw_off, v);
+#ifdef DINO_SPCHECK
+    { extern unsigned g_stk[]; extern int g_stk_depth;
+      for (int i = g_stk_depth - 3; i < g_stk_depth; i++)
+          if (i >= 0) fprintf(stderr, "  <- fn_%05X", g_stk[i]); }
+#endif
+    fprintf(stderr, "\n");
+}
+
 /* Every write to a block's size field, in order. Reads tell us the walk the
  * game performs; writes tell us the chain it believes it built, and the two
  * diverging is the whole question. Only the low byte is recorded, which is
@@ -336,6 +375,7 @@ int recomp_mem_write8(CPU *cpu, uint32_t addr, uint8_t val)
     hdr_write_note(addr, val);
     chain_check(cpu, addr, val);
     f5_note(addr, val);
+    stateword_note(cpu, addr, val);
     if (addr < VGA_LOW || addr >= VGA_HIGH || g_chain4) return 0;
     uint32_t off = addr - VGA_LOW;
     /* Sample on drawing activity, not on a wall clock. An 18.2 Hz timer is far
@@ -874,7 +914,7 @@ static void key_init(void)
 static uint16_t bios_key_word(uint8_t code)
 {
     static const struct { uint8_t sc, ch; } map[] = {
-        { 0x39, ' ' }, { 0x1C, '' }, { 0x01, 27 }, { 0x0E, 8 }, { 0x0F, '	' },
+        { 0x39, ' ' }, { 0x1C, '\r' }, { 0x01, 27 }, { 0x0E, 8 }, { 0x0F, '\t' },
         { 0x02, '1' }, { 0x03, '2' }, { 0x04, '3' }, { 0x05, '4' }, { 0x06, '5' },
         { 0x07, '6' }, { 0x08, '7' }, { 0x09, '8' }, { 0x0A, '9' }, { 0x0B, '0' },
         { 0x10, 'q' }, { 0x11, 'w' }, { 0x12, 'e' }, { 0x13, 'r' }, { 0x14, 't' },
