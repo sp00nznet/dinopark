@@ -30,6 +30,22 @@ SPCHECK = os.environ.get("DINO_SPCHECK") == "1"   # wrap each fn to audit its SP
 # Some C-runtime routines are more trouble lifted than rewritten -- civ reached
 # the same conclusion about its own CRT. They stay in the dispatch table and
 # keep their fn_XXXXX names, so callers and indirect dispatch are unchanged.
+# Compiled blits: `jmp bx` into an unrolled copy block.
+#
+# The sprite plotter sets bx = base - unit*count and jumps into a run of
+# identical copy units, so entering part-way executes exactly `count` of them --
+# a loop the compiler unrolled and the caller indexes into. C has no computed
+# goto, and dispatching the address is meaningless because the targets are
+# mid-block, so each one is replaced by the loop it stands for. The block's own
+# trailing jump lands on the instruction after `jmp bx`, which is exactly where
+# the lifted code continues, so the replacement simply falls through.
+#
+#   base -> (unit size, the body of one unit)
+COMPILED_BLITS = {
+    0xD9C: (4, 'movsb; add si, 3   -- copy forward'),
+    0xF9F: (8, 'lodsb; es:[di] = al; dec di; add si, 3   -- copy backward'),
+}
+
 OVERRIDES = {
     0x05BE8: 'sprintf -- the Borland printf core reads its format from the'
              ' wrong segment however it is driven (see src/test_sprintf.c)',
@@ -157,6 +173,35 @@ def jump_tables(data, insns, cs, offs):
         if arms and (bound is None or len(arms) == bound):
             out[ins.address] = arms
     return out
+
+
+def patch_compiled_blits(body):
+    """Replace `jmp bx` dispatches that index into an unrolled copy block."""
+    out, n = [], 0
+    lines = body.split(chr(10))
+    for idx, line in enumerate(lines):
+        if '/* jmp bx */' not in line or 'recomp_dispatch' not in line:
+            out.append(line)
+            continue
+        base = None
+        for prev in lines[max(0, idx - 4):idx]:
+            for b in COMPILED_BLITS:
+                if f'add bx, 0x{b:X} */' in prev:
+                    base = b
+        if base is None:
+            out.append(line)
+            continue
+        unit, what = COMPILED_BLITS[base]
+        back = 'di--' if unit == 8 else 'di++'
+        out.append(f'    {{ /* compiled blit: {what} */')
+        out.append(f'      unsigned _n = (unsigned)((0x{base:X} - cpu->bx) / {unit});')
+        out.append( '      while (_n--) {')
+        out.append( '          uint8_t _b = mem_read8(cpu, cpu->ds, cpu->si);')
+        out.append( '          mem_write8(cpu, cpu->es, cpu->di, _b);')
+        out.append(f'          cpu->al = _b; cpu->{back}; cpu->si += 4;')
+        out.append( '      } }')
+        n += 1
+    return chr(10).join(out), n
 
 
 def build_segmap(data, ends, decode):
@@ -373,6 +418,7 @@ def main():
     wrappers = []
     names_overridden = set()
     n_arms = 0
+    n_blits = 0
     for name, io, end in funcs:
         if io in OVERRIDES:
             segs_used.add(cs_of(io))
@@ -418,6 +464,8 @@ def main():
                 data, insns, cs, {x.offset for x in insns})
             n_arms += sum(len(v) for v in lifter.jump_tables.values())
             body = lifter.lift_function(name, insns, io, is_far=True)
+            body, n_blit = patch_compiled_blits(body)
+            n_blits += n_blit
             # keep the live cpu->cs honest too -- traces and the runtime read it.
             body = body.replace("(CPU *cpu)" + chr(10) + "{",
                                 f"(CPU *cpu)" + chr(10) + "{" + chr(10) + f"    cpu->cs = SEG_{cs:04X};", 1)
@@ -599,6 +647,8 @@ void recomp_sp_check(unsigned addr, unsigned sp0, unsigned sp1,
     print(f"  code segments: {len(segs_used)}")
     print(f"  wrap-corrected near call/jmp targets: {n_wrapped}")
     print(f"  switch arms lifted inline: {n_arms}")
+    if n_blits:
+        print(f"  compiled blits turned back into loops: {n_blits}")
     print(f"  dispatch entries: {len(names)}  unresolved-call stubs: {len(stubs)}")
     print(f"  entry image offset: 0x{ENTRY_IMG:05X}"
           + ("  (a detected function)" if ENTRY_IMG in known else "  (NOT detected — startup stub needed)"))

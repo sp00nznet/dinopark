@@ -383,29 +383,55 @@ implemented natively: arguments at `sp+4`, result in `DX:AX`, `sp += 12`.
 
 The leak is gone, and the run now ends with **exit code 0** rather than 120.
 
+### Compiled blits
+
+`docs/SPRITES.md` predicted this one: the sprite plotter ends in a computed
+`jmp bx` into an unrolled copy block, and "the only non-mechanical part is the
+computed `jmp bx`, which needs a manual override".
+
+```
+09E20  dec bx / shl bx,1 / shl bx,1 / neg bx / add bx, 0xD9C / jmp bx
+09E4D  shl bx,1 / shl bx,1 / shl bx,1 / neg bx / add bx, 0xF9F / jmp bx
+```
+
+`bx = base - unit*count`, jumping *into* a run of identical copy units so that
+entering part-way executes exactly `count` of them -- a loop the compiler
+unrolled and the caller indexes into. There are two blocks: one of 4-byte units
+(`movsb; add si, 3`, copying forward) ending at offset `0xD9C`, and one of
+8-byte units (`lodsb; es:[di] = al; dec di; add si, 3`, copying backward) ending
+at `0xF9F`. Both walk the source 4 bytes at a time, which is the plane
+de-interleave.
+
+Dispatching those addresses is meaningless -- they are mid-block -- so
+`patch_compiled_blits()` replaces each with the loop it stands for. The block's
+own trailing jump lands on the instruction after `jmp bx`, which is exactly
+where the lifted code continues, so the replacement just falls through. Four
+sites, listed in `COMPILED_BLITS` by the base each indexes from.
+
+### DinoPark draws
+
+With the blits restored, `vga_sample()` finds a frame using **three** distinct
+indices rather than one, and it is a row of text glyphs across the middle of the
+screen -- rendered by the recompiled game, through the Mode X plane path, using
+the `font.pic` it loaded itself.
+
+```
+[best] richest frame seen used 3 distinct indices -> work/best_frame.bmp
+```
+
 ### Where it stops now
 
-DinoPark reads its configuration, brings up stubbed sound, enters Mode X, and
-loads its whole opening sequence -- `font.pic`, `vars.dat`, `btns.act`,
-`blueprnt.act`, `credits.pic`, `mecc.act`, `meccharp.abt` -- programs the DAC,
-and writes a full screen through the plane path. It exits cleanly.
+The glyphs are legible as glyphs but wrong: compressed into roughly a third of
+the width they should occupy. Something in the horizontal step is off -- either
+the plane the Map Mask selects per pass, or `di` advancing once per source
+group where it should advance per plane column. `work/best_frame.raw` and
+`work/best_frame.pal` are written alongside the BMP so a candidate fix can be
+checked against them directly.
 
-It still shows no picture, and the next two things are known:
-
-- **`fn_09DC7`** is now the first SP violation, at -10 a call. It is the planar
-  sprite blitter `docs/SPRITES.md` describes: `out dx, al` to the Sequencer Map
-  Mask, `rol bl, cl` masks, CS-resident scratch at `cs:[0xA]` and `cs:[0x14]`.
-  Hand-written assembly, and it is running precisely because the intro is
-  drawing. (Its BP-clobber flag is a false positive -- it uses BP as a data
-  register, not a frame pointer.)
-- **The frame stays uniform.** `vga_sample()` watches at 18.2 Hz and never sees
-  variety, so the intro composes offscreen and the blit either does not happen
-  or goes somewhere `fb_scan()` does not recognise.
-
-Both point at the same place: the sprite blitter is the next thing to get right,
-and unlike the heap it is a routine whose output we can already check --
-`tools/decode_act.py` renders `ALBERT.ACT` correctly, so there is a reference
-for what it should produce.
+There is also a reference to check against, which the heap never had:
+`tools/decode_act.py` renders `ALBERT.ACT` at 585/585 pixels from the same
+control encoding, so the blitter's output can be diffed against known-correct
+data rather than judged by eye.
 
 ## The segment map
 
