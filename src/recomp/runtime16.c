@@ -84,6 +84,40 @@ static uint16_t g_heap_next = HEAP_LO;
 static uint16_t g_vec_seg[256], g_vec_off[256];
 unsigned long g_port_reads[8];   /* 3DA, 3C5, 3CF, 3C9, other */
 
+/* Planar VGA.
+ *
+ * DinoPark does not use plain mode 13h. fn_09054 sets 13h and then unchains
+ * it: chain-4 off at Sequencer 4, Graphics 5 and 6 cleared, Map Mask 0x0F,
+ * CRTC 0x14/0x17 fixed up. That is Mode X, where one byte address covers four
+ * pixels -- one in each plane -- and the Map Mask decides which planes a write
+ * lands in. Storing it flat collapses all four onto the same byte, which is
+ * why an unchained screen renders as nothing recognisable.
+ *
+ * Chained (13h) writes stay in cpu->mem so the flat path keeps working; only
+ * unchained ones are split out into planes.
+ */
+#define VGA_LOW  0xA0000u
+#define VGA_HIGH 0xB0000u
+static uint8_t g_plane[4][0x10000];
+static int g_chain4 = 1;                   /* mode 13h until told otherwise */
+static uint8_t g_read_plane;               /* Graphics reg 4: read map select */
+
+int recomp_mem_write8(CPU *cpu, uint32_t addr, uint8_t val)
+{
+    if (addr < VGA_LOW || addr >= VGA_HIGH || g_chain4) return 0;
+    uint32_t off = addr - VGA_LOW;
+    for (int p = 0; p < 4; p++)
+        if (g_map_mask & (1u << p)) g_plane[p][off] = val;
+    return 1;
+}
+
+int recomp_mem_read8(CPU *cpu, uint32_t addr, uint8_t *out)
+{
+    if (addr < VGA_LOW || addr >= VGA_HIGH || g_chain4) return 0;
+    *out = g_plane[g_read_plane & 3][addr - VGA_LOW];
+    return 1;
+}
+
 static int g_vga_live;
 static uint8_t g_video_mode = 0x03;
 
@@ -96,10 +130,26 @@ unsigned long vga_ticks(void)
 #endif
 }
 
+/* Compose what is actually on screen into a linear 320x200 buffer.
+ *
+ * Chained, that is just the VGA window. Unchained, pixel (x,y) lives in plane
+ * x&3 at offset y*80 + x/4 -- four planes of 80 bytes per row rather than one
+ * run of 320. */
+static uint8_t g_compose[VGA_W * VGA_H];
+
+static const uint8_t *vga_frame(CPU *cpu)
+{
+    if (g_chain4) return &cpu->mem[VGA_BASE];
+    for (int y = 0; y < VGA_H; y++)
+        for (int x = 0; x < VGA_W; x++)
+            g_compose[y * VGA_W + x] = g_plane[x & 3][y * (VGA_W / 4) + (x >> 2)];
+    return g_compose;
+}
+
 void vga_flush(CPU *cpu)
 {
     if (!g_vga_live) return;
-    vga_window_present(&cpu->mem[VGA_BASE], (const uint8_t *)g_palette);
+    vga_window_present(vga_frame(cpu), (const uint8_t *)g_palette);
 }
 
 /* The 80x25 text screen at B800:0000. DOS programs put their messages there
@@ -196,7 +246,16 @@ void fb_scan(CPU *cpu, const char *path)
 
 void vga_snapshot(CPU *cpu, const char *path)
 {
-    vga_write_bmp(path, &cpu->mem[VGA_BASE], VGA_W, VGA_H,
+    /* Raw indices too: with an unprogrammed DAC every index maps to black, so
+     * the BMP alone cannot tell `nothing drawn` from `drawn, no palette yet`. */
+    { const uint8_t *f = vga_frame(cpu);
+      long nonzero = 0;
+      for (int i = 0; i < VGA_W * VGA_H; i++) if (f[i]) nonzero++;
+      fprintf(stderr, "[vga] %ld of %d pixels non-zero (%s)\n",
+              nonzero, VGA_W * VGA_H, g_chain4 ? "chained" : "Mode X");
+      FILE *r = fopen("work/vga_exit.raw", "wb");
+      if (r) { fwrite(f, 1, VGA_W * VGA_H, r); fclose(r); } }
+    vga_write_bmp(path, vga_frame(cpu), VGA_W, VGA_H,
                   (const uint8_t *)g_palette);
 }
 
@@ -251,9 +310,18 @@ void port_out8(CPU *cpu, uint16_t port, uint8_t val) {
             if ((val & 0xC0) == 0x00) { g_pit_latch = pit_counter(); g_pit_hi = 0; }
             break;
         case 0x3C4: g_seq_index = val; break;
-        case 0x3C5: if (g_seq_index == 2) g_map_mask = val; break;
+        case 0x3C5:
+            if (g_seq_index == 2) g_map_mask = val;
+            /* Sequencer 4 bit 3 is chain-4: set = mode 13h's linear view,
+             * clear = unchained planes. */
+            if (g_seq_index == 4) {
+                int c4 = (val & 0x08) != 0;
+                if (c4 != g_chain4) trace("[VGA] %s\n", c4 ? "chained (13h)" : "UNCHAINED (Mode X)");
+                g_chain4 = c4;
+            }
+            break;
         case 0x3CE: g_gc_index = val; break;
-        case 0x3CF: break;
+        case 0x3CF: if (g_gc_index == 4) g_read_plane = val & 3; break;
         case 0x3D4: g_crtc_index = val; break;
         case 0x3D5: break;
         case 0x3C8: g_dac_wr = val; g_dac_chan = 0; break;

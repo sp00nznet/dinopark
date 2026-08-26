@@ -19,7 +19,7 @@ for ($r = 1; $r -le $rounds; $r++) {
     python tools\lift_full.py *> work\lift.log
     $srcs = @("src\boot.c","src\recomp\cpu.c","src\recomp\runtime16.c","src\recomp\dino_impl.c")
     $srcs += (Get-ChildItem "src\recomp\gen\recomp_*.c" | ForEach-Object { $_.FullName })
-    $cl = "cl /nologo /O1 /W0 /wd4244 /wd4267 /wd4101 /wd4102 /I src /I src\recomp " + ($srcs -join " ") + " /Fe:work\dino_boot.exe /Fo:work\obj\ "
+    $cl = "cl /nologo /O1 /DRECOMP_MEM_HOOK /W0 /wd4244 /wd4267 /wd4101 /wd4102 /I src /I src\recomp " + ($srcs -join " ") + " /Fe:work\dino_boot.exe /Fo:work\obj\ "
     New-Item -ItemType Directory -Force work\obj | Out-Null
     cmd /c "`"$vcvars`" >nul 2>&1 && $cl" *> work\cl.log
     if (-not (Test-Path work\dino_boot.exe)) { Write-Output "round $r : BUILD FAILED"; Get-Content work\cl.log -Tail 3; break }

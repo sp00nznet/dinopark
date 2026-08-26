@@ -329,38 +329,81 @@ tests against zero, and on zero it prints `Unable to load ...` and quits -- so
 both are overridden to report success. The game then runs silently. civ made the
 same call about its graphics driver, which it could not init headless either.
 
-### Where it stops now
+### Mode X
 
-DinoPark reads its configuration, brings up (stubbed) sound, and gets into its
-own asset loading:
+DinoPark does not use plain mode 13h. `fn_09054` sets 13h and then unchains it:
+
+```
+mov ax,0x13 / int 10h
+3C4/4  and 0xF7, or 0x04     chain-4 off
+3CE/5  and 0xEF              graphics mode
+3CE/6  and 0xFD
+3C4/2  map mask 0x0F         all four planes
+A000   rep stosw 0x8000      clear 64 KB
+3D4/14 and 0xBF              CRTC: no DWORD mode
+3D4/17                       CRTC mode control
+```
+
+That is Mode X, where one byte address covers **four** pixels -- one in each
+plane -- and the Map Mask decides which planes a write lands in. Storing it flat
+collapses all four onto the same byte, so an unchained screen can never render
+correctly no matter what the game draws.
+
+A planar model is in now. `cpu.h` gained an opt-in `RECOMP_MEM_HOOK` in the same
+spirit as `SEG_OFF`: define it and byte accesses route through
+`recomp_mem_write8`/`recomp_mem_read8`, where returning 0 means "not mine, store
+it normally". `runtime16.c` implements those for `A0000..AFFFF`, splitting
+unchained writes across `g_plane[4][64K]` by the Map Mask and reading back
+through the Graphics read-map-select. Chained writes stay in `cpu->mem` so the
+flat path is untouched. Presentation composes pixel `(x,y)` from
+`plane[x&3][y*80 + x/4]`.
+
+The runtime reports what it sees, and it sees the right thing:
+
+```
+[INT10] set mode 13
+[VGA] UNCHAINED (Mode X)
+```
+
+### Where it stops now
 
 ```
 open 'product.pf' -> ok    open 'dino.cfg' -> ok
-INT 10h set mode 13
+INT 10h set mode 13        [VGA] UNCHAINED (Mode X)
 open 'SBPFM.ADV'  -> ok    open 'MIDPAK.AD' -> ok
-open 'font.pic'   -> ok    open 'font.pic'  -> ok
-open 'vars.dat'   -> ok    open 'btns.act'  -> ok
+open 'font.pic'   -> ok    open 'vars.dat'  -> ok    open 'btns.act' -> ok
+[vga] 0 of 64000 pixels non-zero (Mode X)
+[fb] DAC palette still all zero
 ```
 
-Its font, its variables and its button sprites. It does not exit -- the watchdog
-stops it -- but it settles into a loop after `btns.act` and opens nothing more.
+The game reads its configuration, brings up stubbed sound, enters Mode X, and
+loads its font, its variables and its button sprites -- then stops. **Nothing is
+drawn: zero pixels, and the DAC is never programmed.**
 
-**It still has not drawn.** Two things are known about why:
+The wall is DinoPark's own heap. The live call stack under `-DDINO_SPCHECK`:
 
-- **The DAC is never programmed.** `fb_scan` reports `DAC palette still all
-  zero`, so every index maps to black regardless of what is in memory.
-- **DinoPark runs Mode X, not plain 13h.** `fn_09054` sets mode 13h and then
-  unchains it -- `3C4/4` clears chain-4, `3CE/5` and `3CE/6` clear, map mask to
-  `0x0F`, then `rep stosw` over 64 KB of `A000` and CRTC `0x14`/`0x17` fixups.
-  In unchained mode each byte address covers four pixels, one per plane, chosen
-  by the Map Mask -- so the flat `mem[0xA0000]` model collapses all four planes
-  onto the same byte. Plane-aware writes are needed before anything on that
-  screen will be right.
+```
+fn_00000  fn_0C6A6  fn_0CDDB  fn_0D885  fn_2F0C3  fn_2F0CD
+```
 
-`fb_scan()` hunts for an offscreen framebuffer the way civ found its own --
-scoring 320x200 windows for picture-like statistics and dumping the best as BMP,
-raw indices and palette. Right now its best candidate is loaded asset data
-rather than a screen, which fits: the game has not composed a frame yet.
+`fn_2F0CD` walks a chain of memory blocks:
+
+```
+2F0CD  mov ax, ds:[0x742A]     first block
+2F0D2  cmp ax, ds:[0x742E]     reached the end?
+2F0DB  test byte es:[8], 0x80  block flags
+2F0E3  add ax, es:[2]          next = current + size
+2F0E8  jmp back
+```
+
+If a block's size field at `es:[2]` is zero, `ax` never advances and the walk
+never terminates. The heap lives in the 324 KB block `AH=48` hands over, which
+starts as zeroed memory -- so either the block headers are never written, or
+they are written somewhere other than where this walker looks. `ds:[0x742A]` and
+`ds:[0x742E]` are its bounds and are the first things to print.
+
+This is the handle-based allocator the original roadmap called out as step 1 on
+the road to interactive, and it is now genuinely the next thing in the way.
 
 ## The segment map
 
