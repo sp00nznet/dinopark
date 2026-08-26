@@ -52,8 +52,6 @@ OVERRIDES = {
     0x00419: 'Miles driver load -- the .COM driver is a separate binary we do'
              ' not lift, and a zero handle makes the game quit',
     0x005E0: 'MIDPAK load -- same as 0x419 for the MIDI driver',
-    0x2F0C3: 'heap compactor -- it breaks the block chain and then hangs'
-             ' walking it; disabled as a probe, see dino_impl.c',
     0x0172F: 'Borland 32-bit divide -- multi-entry with near-to-far frame'
              ' juggling; lifted it returns without popping its arguments',
     0x02FA6: '_setargv -- returns through a computed jmp and leaves DS on the'
@@ -318,7 +316,22 @@ def main():
         fs = detlist[i]
         fe = det_end[fs]
         if not (fs < t < fe):
-            return False
+            # Not inside any detected function. If it is in the gap *between*
+            # two of them the analyzer simply never claimed that ground, and a
+            # call target in unclaimed space is an entry point by definition --
+            # accept it if it decodes. The memory manager is written in
+            # assembly and has no Borland prologues, so its helpers all landed
+            # here: the block-move that compaction slides blocks with was being
+            # stubbed to nothing, which is why compacting could never make
+            # progress and the allocator span forever on a fragmented heap.
+            nxt = detlist[i + 1] if i + 1 < len(detlist) else len(data) - HDR
+            if not (fe <= t < nxt):
+                return False
+            try:
+                ins = Decoder(data[t + HDR:t + HDR + 32], base_offset=t).decode_all()
+            except Exception:
+                return False
+            return bool(ins)
         try:
             offs = {ins.offset for ins in Decoder(data[fs + HDR:fe + HDR], base_offset=fs).decode_all()}
         except Exception:
@@ -399,11 +412,40 @@ def main():
         funcs.append((f"fn_{s:05X}", s, end))
     for s in sorted(starts):
         funcs.append((f"fn_{s:05X}", s, det_end[s]))
+    def flow_end(t, cap):
+        """Where the function at t ends, by following its control flow.
+
+        The next start is the usual answer, but the memory manager's assembly
+        helpers sit above every function the analyzer found, so the last of them
+        has no next start and the old fallback (the highest detected end) came
+        out BELOW the target -- an empty range, and the block-move compaction
+        depends on lifted to nothing.
+
+        Decode forward and stop after the first ret/retf that nothing decoded so
+        far jumps past. Trailing bytes are data as often as code, so cap it.
+        """
+        try:
+            insns = Decoder(data[t + HDR:cap + HDR], base_offset=t).decode_all()
+        except Exception:
+            return None
+        reach = t
+        for ins in insns:
+            o = ins.op1
+            if (ins.mnemonic.startswith(('j', 'loop')) and o
+                    and o.type in (OpType.REL8, OpType.REL16)):
+                reach = max(reach, t + (o.disp & 0xFFFF))
+            if ins.mnemonic in ('ret', 'ret far', 'retf') and ins.offset >= reach:
+                return ins.offset + ins.length
+        return None
+
     # forced miss-targets: span to the next detected/forced start
     allpts = sorted(starts | forced_targets)
     for s in sorted(forced_targets):
         i = allpts.index(s)
-        end = allpts[i + 1] if i + 1 < len(allpts) else max(det_end.values())
+        if i + 1 < len(allpts):
+            end = allpts[i + 1]
+        else:
+            end = flow_end(s, min(len(data) - HDR, s + 0x400)) or (s + 0x40)
         funcs.append((f"fn_{s:05X}", s, end))
     if forced_targets:
         print(f"  forced miss-target functions: {len(forced_targets)}")

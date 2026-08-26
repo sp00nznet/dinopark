@@ -76,7 +76,12 @@ static uint8_t g_palette[256][3];
  * sits just above it, so allocations come from the gap between the stack top
  * and the PSP. A bump allocator is enough -- the game frees at exit, if ever. */
 #define HEAP_LO 0x3F10u
-#define HEAP_HI 0x9000u
+/* Up to the PSP, which now sits just under the video window. It used to be at
+ * 0x9000 with the environment above it, which quietly cost the game the top
+ * 64K of conventional memory -- DOS would have left everything below 0xA000
+ * free. The intro ran out at the Manley screen and reported its own
+ * "memory err 2" because of it. */
+#define HEAP_HI 0x9F00u
 static uint16_t g_heap_next = HEAP_LO;
 static uint16_t g_dgroup;                  /* from `mov dx, DGROUP` at image 0 */
 
@@ -287,6 +292,37 @@ void write_histogram(void)
                 g_page_writes[best],
                 (best >= 0xA0 && best < 0xB0) ? "   (the VGA window)" : "");
     }
+}
+
+/* Is anything ever freed?
+ *
+ * The heap fills and the allocator spins, but a full heap after five intro
+ * screens is only a bug if the game meant to hand those screens back. Walking
+ * the block chain and totalling used against free answers it; printing that
+ * once per file the game opens turns it into a series, and a leak shows up as
+ * free paragraphs falling monotonically screen after screen.
+ *
+ * Counting writes to the flag byte instead does not work: a block header's +8
+ * is one byte in sixteen, so a blitted image writes thousands of them. */
+void heap_summary(CPU *cpu, const char *why)
+{
+    if (!g_dgroup) return;
+    uint16_t first = mem_read16(cpu, g_dgroup, 0x742A);
+    uint16_t last  = mem_read16(cpu, g_dgroup, 0x742E);
+    if (!first || !last) return;
+    unsigned used = 0, freep = 0, nblk = 0, nfree = 0, biggest = 0;
+    uint16_t seg = first;
+    for (; nblk < 8192 && seg != last; nblk++) {
+        if (seg < HEAP_LO || seg >= HEAP_HI) break;
+        uint16_t size = mem_read16(cpu, seg, 2);
+        if (!size) break;
+        if (cpu->mem[seg_off(seg, 0) + 8] & 0x80) { used += size; }
+        else { freep += size; nfree++; if (size > biggest) biggest = size; }
+        seg = (uint16_t)(seg + size);
+    }
+    fprintf(stderr, "[heapsum] %-14s %u blocks, used %uK, free %uK in %u blocks "
+                    "(largest %uK)\n", why, nblk, used / 64, freep / 64, nfree,
+            biggest / 64);
 }
 
 int recomp_mem_write8(CPU *cpu, uint32_t addr, uint8_t val)
@@ -859,6 +895,7 @@ static void int21(CPU *cpu) {
             int fh = -1; for (int i = 5; i < MAXFH; i++) if (!g_fh[i]) { fh = i; break; }
             FILE *f = fh >= 0 ? open_game_file(name, "rb") : NULL;
             trace("[INT21] open '%s' -> %s fh=%d\n", name, f ? "ok" : "FAIL", fh);
+            heap_summary(cpu, name);
             if (f) { g_fh[fh] = f; cpu->ax = fh; cpu->flags &= ~FLAG_CF; }
             else   { cpu->ax = 2; cpu->flags |= FLAG_CF; }
             break;
@@ -1078,7 +1115,11 @@ int dino_load_image(CPU *cpu, const char *path) {
     /* Build a minimal PSP + environment above the image (image lives at
      * linear 0). DOS hands a real program DS=ES=PSP and the env segment in
      * PSP:[0x2C]; the Borland c0 startup scans the env and aborts without it. */
-    const uint16_t PSP_SEG = 0x9000, ENV_SEG = 0x9100, TOP_SEG = 0xA000;
+    /* Park the PSP and environment at the top, immediately below the video
+     * window, so the heap gets the whole span beneath them. Both are small --
+     * the PSP is one paragraph short of 0x100 bytes and the environment fits
+     * in the 0x400 this code zeroes -- so 0x9F00 upwards is room to spare. */
+    const uint16_t PSP_SEG = 0x9F00, ENV_SEG = 0x9F10, TOP_SEG = 0xA000;
     uint32_t psp = seg_off(PSP_SEG, 0), env = seg_off(ENV_SEG, 0);
     cpu->mem[psp + 0x00] = 0xCD; cpu->mem[psp + 0x01] = 0x20;          /* INT 20h */
     cpu->mem[psp + 0x02] = TOP_SEG & 0xFF; cpu->mem[psp + 0x03] = TOP_SEG >> 8; /* top of mem */
