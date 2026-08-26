@@ -102,6 +102,50 @@ void vga_flush(CPU *cpu)
     vga_window_present(&cpu->mem[VGA_BASE], (const uint8_t *)g_palette);
 }
 
+/* The 80x25 text screen at B800:0000. DOS programs put their messages there
+ * directly rather than through DOS, so an error the game is showing the user
+ * is otherwise invisible to us. Printed only if something is actually on it. */
+/* The game formats its errors into a stack buffer and hands them to a printer
+ * we do not fully model, so they never reach a screen we can read. The bytes
+ * are still there at exit: sweep the stack segment for one and show it. */
+void stack_message_scan(CPU *cpu)
+{
+    uint32_t base = seg_off(cpu->ss, 0);
+    for (uint32_t i = 0; i < 0x2000; i++) {
+        const char *s = (const char *)&cpu->mem[base + i];
+        int n = 0;
+        while (n < 80 && s[n] >= 32 && s[n] < 127) n++;
+        if (n >= 12 && s[n] == 0) {
+            fprintf(stderr, "[stack] %s\n", s);
+            i += n;
+        }
+    }
+}
+
+void text_snapshot(CPU *cpu)
+{
+    uint32_t base = 0xB8000;
+    int any = 0;
+    for (int i = 0; i < 80 * 25 * 2; i += 2) {
+        uint8_t c = cpu->mem[base + i];
+        if (c && c != ' ') { any = 1; break; }
+    }
+    if (!any) return;
+    fprintf(stderr, "---- text screen ----\n");
+    for (int y = 0; y < 25; y++) {
+        char line[81];
+        int last = -1;
+        for (int x = 0; x < 80; x++) {
+            uint8_t c = cpu->mem[base + (y * 80 + x) * 2];
+            line[x] = (c >= 32 && c < 127) ? (char)c : ' ';
+            if (line[x] != ' ') last = x;
+        }
+        line[last + 1] = 0;
+        if (last >= 0) fprintf(stderr, "| %s\n", line);
+    }
+    fprintf(stderr, "---------------------\n");
+}
+
 void vga_snapshot(CPU *cpu, const char *path)
 {
     vga_write_bmp(path, &cpu->mem[VGA_BASE], VGA_W, VGA_H,
@@ -214,6 +258,24 @@ static void int21(CPU *cpu) {
         case 0x49: cpu->flags &= ~FLAG_CF; break;    /* free: bump alloc, no reuse */
         case 0x4A:                                   /* resize the program block */
             cpu->flags &= ~FLAG_CF; break;           /* always granted; it never moves */
+        case 0x3C: {                                 /* create/truncate file */
+            /* Without this the game cannot write its sound-configuration file,
+             * gets a junk handle from the default success reply, and reports
+             * "Unable to create configuration file". Created files go beside
+             * the game data so a second run finds them. */
+            char name[128]; read_fname(cpu, cpu->ds, cpu->dx, name, sizeof name);
+            int fh = -1; for (int i = 5; i < MAXFH; i++) if (!g_fh[i]) { fh = i; break; }
+            FILE *f = fh >= 0 ? open_game_file(name, "wb") : NULL;
+            if (!f && fh >= 0) {                     /* not there yet: make it */
+                char path[256];
+                snprintf(path, sizeof path, "original/%s", name);
+                f = fopen(path, "wb");
+            }
+            trace("[INT21] create '%s' -> %s fh=%d\n", name, f ? "ok" : "FAIL", fh);
+            if (f) { g_fh[fh] = f; cpu->ax = fh; cpu->flags &= ~FLAG_CF; }
+            else   { cpu->ax = 3; cpu->flags |= FLAG_CF; }
+            break;
+        }
         case 0x3D: {                                 /* open file */
             char name[128]; read_fname(cpu, cpu->ds, cpu->dx, name, sizeof name);
             int fh = -1; for (int i = 5; i < MAXFH; i++) if (!g_fh[i]) { fh = i; break; }
@@ -267,13 +329,46 @@ static void int21(CPU *cpu) {
             cpu->dx = (cpu->bx <= 2) ? 0x80D3 : 0x0002;
             cpu->ax = cpu->dx;
             cpu->flags &= ~FLAG_CF; break;
-        case 0x43:                                   /* get/set file attributes */
-            if (cpu->al == 0) cpu->cx = 0x20;        /* archive */
-            cpu->flags &= ~FLAG_CF; break;
+        case 0x43: {                                 /* get/set file attributes */
+            /* Answer from the filesystem instead of always saying yes: the
+             * game probes for files here, and a blanket success sends it down
+             * whichever path assumes they are present. */
+            char name[128]; read_fname(cpu, cpu->ds, cpu->dx, name, sizeof name);
+            FILE *probe = open_game_file(name, "rb");
+            if (probe) fclose(probe);
+            trace("[INT21] attr AL=%02X '%s' -> %s\n",
+                  cpu->al, name, probe ? "exists" : "MISSING");
+            if (cpu->al == 0 && !probe) {
+                cpu->ax = 2; cpu->flags |= FLAG_CF;  /* file not found */
+            } else {
+                if (cpu->al == 0) cpu->cx = 0x20;    /* archive */
+                cpu->flags &= ~FLAG_CF;
+            }
+            break;
+        }
         case 0x57:                                   /* get/set file date+time */
             if (cpu->al == 0) { cpu->cx = 0x6000; cpu->dx = 0x1A61; }  /* 1993-03-01 */
             cpu->flags &= ~FLAG_CF; break;
-        case 0x4C: trace("[INT21] exit code %d\n", cpu->al); cpu->halted = 1; break;
+        case 0x4C:                                   /* terminate */
+            /* DOS terminate does not return. Pretending otherwise let the
+             * lifted code run on into the bytes after `int 21h`, which is
+             * where the hundreds of bogus recursive exits and every
+             * `Stack overflow!` were coming from -- all of it post-mortem. */
+            trace("[INT21] exit code %d\n", cpu->al);
+            cpu->halted = 1;
+            text_snapshot(cpu);
+            stack_message_scan(cpu);
+#ifdef DINO_SPCHECK
+            /* Who decided to quit? The audit's live call stack still holds the
+             * chain that got here. */
+            { extern unsigned g_stk[]; extern int g_stk_depth;
+              fprintf(stderr, "[exit] call chain (%d deep):\n", g_stk_depth);
+              for (int i = 0; i < g_stk_depth && i < 40; i++)
+                  fprintf(stderr, "    fn_%05X\n", g_stk[i]); }
+#endif
+            vga_snapshot(cpu, "work/vga_exit.bmp");
+            fflush(stdout); fflush(stderr);
+            exit(cpu->al);
         default:
             /* Report success. DOS returns errors in CF, and leaving it as we
              * found it means a stale carry from some earlier call reads as a

@@ -239,7 +239,9 @@ def main():
             o = ins.op1
             if ins.mnemonic in ('call', 'call far') and o and o.type == OpType.FAR:
                 t = (o.far_seg * 16 + o.disp) & 0xFFFFF
-                if t not in starts and t not in forced_targets and valid_boundary(t):
+                if 0 < t < first_det:
+                    call_tgts.add(t)          # inside the startup region
+                elif t not in starts and t not in forced_targets and valid_boundary(t):
                     forced_targets.add(t)
                     n_farfix += 1
             if ins.mnemonic == 'call' and o and o.type == OpType.REL16:
@@ -248,7 +250,13 @@ def main():
                 # nothing. Wrap the target the way the lifter will.
                 base = cs_of(s) * 16
                 t = base + ((s - base + o.disp) & 0xFFFF)
-                if t not in starts and t not in forced_targets and valid_boundary(t):
+                # A target inside the Borland startup has no containing detected
+                # function -- the analyzer never found one down there -- so
+                # valid_boundary can never accept it and it was becoming a stub.
+                # The startup's own subroutines are already carved out this way.
+                if 0 < t < first_det:
+                    call_tgts.add(t)
+                elif t not in starts and t not in forced_targets and valid_boundary(t):
                     forced_targets.add(t)
                     n_nearfix += 1
     if n_farfix or n_nearfix:

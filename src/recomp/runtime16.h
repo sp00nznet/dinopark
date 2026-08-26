@@ -39,5 +39,7 @@ void catz_div0(const char *kind);   /* divide-by-zero from lifted code */
 unsigned long vga_ticks(void);   /* BIOS 18.2 Hz tick count */
 void vga_flush(CPU *cpu);
 void vga_snapshot(CPU *cpu, const char *path);
+void text_snapshot(CPU *cpu);    /* dump the 80x25 text screen */
+void stack_message_scan(CPU *cpu);   /* strings left on the guest stack */
 
 #endif

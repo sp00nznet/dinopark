@@ -231,25 +231,71 @@ alloc FFFF para -> 0008 (avail 50F0)     probe fails, reports the largest block
 alloc 50F0 para -> 3F10 (avail 50F0)     the game takes all 324 KB
 ```
 
+### DOS terminate has to terminate
+
+Every `Stack overflow!` and every one of the hundreds of nonsense recursive
+exits turned out to be **post-mortem noise**. The game was reaching
+`mov ah, 4Ch / int 21h` -- a deliberate, clean `exit(0)`, preceded by Borland's
+`_exit` restoring interrupt vectors 00/04/05/06 -- and the runtime answered it
+by setting `cpu->halted` and returning. Nothing checks that flag, so the lifted
+code ran on into the bytes after the `int 21h` and everything after that was
+garbage being executed.
+
+`AH=4Ch` now snapshots the screen and calls `exit()`. The effect is out of all
+proportion to the fix: the boot ends cleanly, and the SP audit reports **zero
+violations** across the entire run. All the frame drift that survived the last
+round was happening after the program had already asked to die.
+
+Three diagnostics went in alongside it, and all three are worth keeping:
+
+- **The exit call chain.** `-DDINO_SPCHECK` prints the live call stack from
+  inside `AH=4Ch`, so the question "who decided to quit?" is answered directly.
+- **`text_snapshot`** dumps the 80x25 text screen at B800:0000, because DOS
+  programs write messages there rather than through DOS.
+- **`stack_message_scan`** sweeps the stack segment for printable strings. The
+  game formats its errors into a stack buffer and hands them to a printer we do
+  not fully model, so they otherwise never reach anything we can read.
+
+`AH=43h` now answers file-attribute probes from the filesystem instead of
+always saying yes, `AH=3Ch` (create) is implemented, and the startup region's
+call targets are carved into their own functions -- a target below `first_det`
+has no containing detected function, so `valid_boundary` could never accept one
+and four of them were becoming stubs that swallowed `_exit`'s frame.
+
 ### Where it stops now
 
-The boot gets its heap, reaches mode 13h, and runs on into the real game --
-far enough to start bringing up **Miles audio**, opening `MIDPAK.AD` and
-`MIDPAK.COM` successfully. The call stack at that depth is game code
-(`fn_10C86`, `fn_10AE8`, `fn_0E7F5`, `fn_19801`, ...) rather than C runtime.
+The boot is clean. No corruption, no spurious output, and it terminates the way
+the program asks to:
 
-It still does not draw: `work/vga_exit.bmp` is a black 320x200. Open:
+```
+attr 'product.pf' -> exists     open 'product.pf' -> ok
+attr 'dino.cfg'   -> exists     INT 10h set mode 03     exit code 0
+```
 
-- **Frame drift comes back at depth.** SP wraps again once the boot is this
-  deep, so there is at least one more unbalanced path past the ones the audit
-  already caught. Re-run with `-DDINO_SPCHECK` and read the first violation --
-  that loop is what has been working.
-- **One open still gets a garbage filename**, so a pointer handed to the open
-  path is wrong on that route.
-- **`Error closing file`** is Borland's `fclose` returning -1: it bails when
-  `es:[bx+0x12]`, the FILE's own offset kept as a validity token, does not match
-  the pointer it was passed. The stdio struct is not being set up the way its
-  own runtime expects.
+It is quitting **on purpose**, in its sound-configuration path. The exit chain
+is `fn_0C6A6 -> fn_196CF -> fn_0F4FE -> fn_01604 -> fn_015AD -> fn_0016B`, and
+`fn_0C6A6` is the config-file locator: it builds a path in a stack buffer with
+`strcpy`/`strcat` from `'dino.cfg'`, `'config.exe'` and an empty string, checks
+it, and on failure formats
+
+```
+DGROUP:3EC5   "Unable to create configuration file '%s'.
+"
+DGROUP:57D9   "%s: file not Found"
+```
+
+Both are reachable from there. What is left on the stack at exit is
+`": file not Found"` -- with an **empty filename**, so the buffer those string
+routines were supposed to fill is still empty when it is used. `fn_05E79` and
+`fn_05DCD` (the `strcpy`/`strcat`) are both lifted and called properly, so the
+next question is what the path-producing call above them returns.
+
+Worth knowing for that hunt: `DINO.CFG` is 20 bytes, `"SBPRO.COM
+SBPFM.ADV
+"`
+-- the Sound Blaster Pro driver names -- and both of those files are present in
+`original/`. `PRODUCT.PF` is MECC's product record (copyright, address,
+"DinoPark Tycoon"), not a file index.
 
 ## The segment map
 
