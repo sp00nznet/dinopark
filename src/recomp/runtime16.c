@@ -78,6 +78,7 @@ static uint8_t g_palette[256][3];
 #define HEAP_LO 0x3F10u
 #define HEAP_HI 0x9000u
 static uint16_t g_heap_next = HEAP_LO;
+static uint16_t g_dgroup;                  /* from `mov dx, DGROUP` at image 0 */
 
 /* Vectors the guest installs. Recorded so a spin waiting on an ISR-updated
  * flag can be told apart from one that is simply looping. */
@@ -205,6 +206,41 @@ void text_snapshot(CPU *cpu)
  * like a picture: many distinct byte values, and neighbouring pixels usually
  * but not always equal. Flat fills and code both score badly.
  */
+/* DinoPark's own heap, roughly as its walker sees it.
+ *
+ * fn_2F0CD chains blocks with `next = current + [es:2]`, bounded by the words at
+ * DGROUP:742A and DGROUP:742E, and that is what this reproduces. Be careful
+ * reading the tail: the real walker only advances that simply when the flag byte
+ * at [es:8] has bit 7 set. With it clear it branches into a coalescing path, so
+ * this dump stops being faithful at the first flags=00 block and anything it
+ * prints after that is its own confusion, not evidence of corruption.
+ *
+ * Useful for what it does show: the bounds, and that the first ~20 blocks chain
+ * cleanly with sensible sizes. */
+void heap_dump(CPU *cpu)
+{
+    if (!g_dgroup) return;
+    uint16_t first = mem_read16(cpu, g_dgroup, 0x742A);
+    uint16_t last  = mem_read16(cpu, g_dgroup, 0x742E);
+    fprintf(stderr, "[heap] first=%04X last=%04X (we handed out %04X..%04X)\n",
+            first, last, (unsigned)HEAP_LO, (unsigned)HEAP_HI);
+    uint16_t seg = first;
+    int n = 0;
+    const char *verdict = "ran past the block cap";
+    for (; n < 8192; n++) {
+        if (seg == last) { verdict = "reached the end marker"; break; }
+        uint32_t a = seg_off(seg, 0);
+        if (a + 16 >= 0x100000u) { verdict = "walked off the top of memory"; break; }
+        uint16_t size = mem_read16(cpu, seg, 0x2);
+        if (!size) { verdict = "hit a zero-size block"; break; }
+        if (n < 40)
+            fprintf(stderr, "[heap]   blk %2d @%04X size=%04X flags=%02X\n",
+                    n, seg, size, cpu->mem[a + 8]);
+        seg = (uint16_t)(seg + size);
+    }
+    fprintf(stderr, "[heap] %d blocks, stopped at %04X: %s\n", n, seg, verdict);
+}
+
 void fb_scan(CPU *cpu, const char *path)
 {
     const uint32_t SIZE = 320u * 200u;
@@ -629,6 +665,11 @@ int dino_load_image(CPU *cpu, const char *path) {
     /* MZ initial register state (image space); DOS enters with DS=ES=PSP */
     cpu->cs = LOADSEG;  cpu->ip = 0;                      /* CS:IP = 0000:0000 */
     cpu->ss = 0x3D04;   cpu->sp = 0x0080;                /* from header */
+    /* The startup's very first instruction is `mov dx, DGROUP` -- a relocated
+     * immediate at image offset 1 -- so the data segment is readable from the
+     * image rather than hardcoded. */
+    g_dgroup = (uint16_t)(cpu->mem[1] | (cpu->mem[2] << 8));
+
     cpu->ds = PSP_SEG;  cpu->es = PSP_SEG;
     printf("loaded %ld image bytes, %u relocs; entry %04X:%04X SS:SP %04X:%04X DS=%04X(PSP)\n",
            img_sz, nrelocs, cpu->cs, cpu->ip, cpu->ss, cpu->sp, cpu->ds);

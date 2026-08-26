@@ -402,8 +402,32 @@ starts as zeroed memory -- so either the block headers are never written, or
 they are written somewhere other than where this walker looks. `ds:[0x742A]` and
 `ds:[0x742E]` are its bounds and are the first things to print.
 
-This is the handle-based allocator the original roadmap called out as step 1 on
-the road to interactive, and it is now genuinely the next thing in the way.
+`heap_dump()` prints those bounds and walks the chain. What it shows:
+
+```
+[heap] first=400B last=9000 (we handed out 3F10..9000)
+[heap]   blk  0 @400B size=0011 flags=A0
+[heap]   blk  1 @401C size=1070 flags=A0
+...
+[heap]   blk 20 @6C05 size=0021 flags=00
+[heap]   blk 21 @6C26 size=0021 flags=00
+[heap] 24 blocks, stopped at E582: hit a zero-size block
+```
+
+The bounds are right and the first twenty blocks chain cleanly with sensible
+sizes, so the heap is not obviously broken. Read the tail with care, though:
+the real walker only advances by `size` when the flag byte at `[es:8]` has bit 7
+set, and with it clear it branches into a coalescing path instead. Blocks 20 and
+21 are the first with `flags=00`, which is exactly where this dump stops being
+faithful -- everything it prints after that is its own confusion rather than
+evidence of corruption. (An early guess that the `0xF5` bytes past that point
+were an allocator poison was wrong: `0xF5` is loaded at fifteen sites, all in
+drawing code, so it is a colour or sentinel value.)
+
+So the next step is to model that coalescing branch faithfully, or trace the
+real walker, before concluding anything about the chain past block 20. This is
+the handle-based allocator the original roadmap called out as step 1 on the road
+to interactive.
 
 ## The segment map
 
