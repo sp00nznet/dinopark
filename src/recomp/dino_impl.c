@@ -199,3 +199,45 @@ void fn_2F0C3(CPU *cpu)
 {
     cpu->sp = (uint16_t)(cpu->sp + 4);
 }
+
+/*
+ * Borland's 32-bit divide helper.
+ *
+ * Four entry points share one body: 0x172F, and 0x1733/0x173B/0x1743 which
+ * begin `pop cx / push cs / push cx` -- the trick for turning a near call frame
+ * into a far one before falling through. `cx` picks the operation, bit 0 for
+ * unsigned and bit 1 for remainder, and the body ends `retf 0x8`, so the callee
+ * clears its own two 32-bit arguments and the expected stack delta is 12.
+ *
+ * Lifted, it returns without popping them: the SP audit shows fn_0172F coming
+ * back +0 and its caller's SP walking down 12 bytes a call until Borland's own
+ * stack check trips. That frame juggling is exactly what a hand implementation
+ * avoids.
+ *
+ * Far call. Arguments at sp+4: dividend low, high, then divisor low, high.
+ * Result in DX:AX. Entry 0 is the signed quotient.
+ */
+static void ldiv_common(CPU *cpu, int is_unsigned, int want_remainder)
+{
+    uint16_t sp = cpu->sp;
+    uint32_t a = (uint32_t)mem_read16(cpu, cpu->ss, (uint16_t)(sp + 4)) |
+                 ((uint32_t)mem_read16(cpu, cpu->ss, (uint16_t)(sp + 6)) << 16);
+    uint32_t b = (uint32_t)mem_read16(cpu, cpu->ss, (uint16_t)(sp + 8)) |
+                 ((uint32_t)mem_read16(cpu, cpu->ss, (uint16_t)(sp + 10)) << 16);
+
+    uint32_t r;
+    if (b == 0) {
+        r = 0;                                  /* the guest installs no INT 0 */
+    } else if (is_unsigned) {
+        r = want_remainder ? (a % b) : (a / b);
+    } else {
+        int32_t sa = (int32_t)a, sb = (int32_t)b;
+        r = (uint32_t)(want_remainder ? (sa % sb) : (sa / sb));
+    }
+
+    cpu->ax = (uint16_t)r;
+    cpu->dx = (uint16_t)(r >> 16);
+    cpu->sp = (uint16_t)(sp + 4 + 8);           /* retf 8 */
+}
+
+void fn_0172F(CPU *cpu) { ldiv_common(cpu, 0, 0); }   /* signed quotient */

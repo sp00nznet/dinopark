@@ -38,6 +38,8 @@ OVERRIDES = {
     0x005E0: 'MIDPAK load -- same as 0x419 for the MIDI driver',
     0x2F0C3: 'heap compactor -- it breaks the block chain and then hangs'
              ' walking it; disabled as a probe, see dino_impl.c',
+    0x0172F: 'Borland 32-bit divide -- multi-entry with near-to-far frame'
+             ' juggling; lifted it returns without popping its arguments',
     0x02FA6: '_setargv -- returns through a computed jmp and leaves DS on the'
              ' PSP; the game takes no command-line arguments',
 }

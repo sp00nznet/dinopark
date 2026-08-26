@@ -365,191 +365,47 @@ The runtime reports what it sees, and it sees the right thing:
 [VGA] UNCHAINED (Mode X)
 ```
 
-### Where it stops now
+### Borland's 32-bit divide
 
-```
-open 'product.pf' -> ok    open 'dino.cfg' -> ok
-INT 10h set mode 13        [VGA] UNCHAINED (Mode X)
-open 'SBPFM.ADV'  -> ok    open 'MIDPAK.AD' -> ok
-open 'font.pic'   -> ok    open 'vars.dat'  -> ok    open 'btns.act' -> ok
-[vga] 0 of 64000 pixels non-zero (Mode X)
-[fb] DAC palette still all zero
-```
+With the intro running, the SP audit named `fn_0172F` coming back **+0** while
+its caller's SP walked down 12 bytes a call until Borland's stack check tripped.
 
-The game reads its configuration, brings up stubbed sound, enters Mode X, and
-loads its font, its variables and its button sprites -- then stops. **Nothing is
-drawn: zero pixels, and the DAC is never programmed.**
+It is the long-division helper, and it has the awkward shape those helpers do:
+four entry points sharing one body, where `0x1733`/`0x173B`/`0x1743` begin
+`pop cx / push cs / push cx` -- the trick for turning a near call frame into a
+far one before falling through -- while `0x172F` does not. `cx` selects the
+operation, bit 0 unsigned and bit 1 remainder, and the body ends `retf 0x8`, so
+the callee clears its own two 32-bit arguments and the correct delta is **+12**.
 
-The wall is DinoPark's own heap. The live call stack under `-DDINO_SPCHECK`:
+Lifted, it never popped them. It is a C-runtime routine with fiddly frame
+juggling, which is exactly the profile of the ones already replaced, so it is
+implemented natively: arguments at `sp+4`, result in `DX:AX`, `sp += 12`.
 
-```
-fn_00000  fn_0C6A6  fn_0CDDB  fn_0D885  fn_2F0C3  fn_2F0CD
-```
-
-`fn_2F0CD` walks a chain of memory blocks:
-
-```
-2F0CD  mov ax, ds:[0x742A]     first block
-2F0D2  cmp ax, ds:[0x742E]     reached the end?
-2F0DB  test byte es:[8], 0x80  block flags
-2F0E3  add ax, es:[2]          next = current + size
-2F0E8  jmp back
-```
-
-If a block's size field at `es:[2]` is zero, `ax` never advances and the walk
-never terminates. The heap lives in the 324 KB block `AH=48` hands over, which
-starts as zeroed memory -- so either the block headers are never written, or
-they are written somewhere other than where this walker looks. `ds:[0x742A]` and
-`ds:[0x742E]` are its bounds and are the first things to print.
-
-Three diagnostics answer this without reimplementing anything the game does,
-which is where several wrong conclusions came from:
-
-- **`heap_dump()`** prints the walker's bounds and follows the chain. Read its
-  tail with care -- the real walker only advances by `size` when bit 7 of the
-  flag byte at `[es:8]` is set, and branches into a coalescing path otherwise,
-  so this dump stops being faithful at the first `flags=00` block.
-- **`DINO_HEAPTRACE=1`** records the block sequence the game *actually* walks,
-  by noting every read of a linear address ending in 2 inside the heap. No
-  modelling, just observation.
-- **`DINO_WATCH=<linear hex>`** reports the first write to one address along
-  with the live call stack, which under `-DDINO_SPCHECK` names the routine.
-
-What they show:
-
-```
-[walk] 400B 401C 508C ... 6BED 6C05 6C26 6C47 623C   then back to 400B, forever
-```
-
-The chain reaches `0x6C47`, reads `F5F5` as a size, and `0x6C47 + 0xF5F5` wraps
-to `0x623C` -- backwards, into the middle of the heap, and round again. That is
-the hang.
-
-`DINO_WATCH=6C472` names who put `F5` there:
-
-```
-fn_00000 fn_0C6A6 fn_0CDDB fn_0D885 fn_0E4CB fn_0E359 fn_19767 fn_04591 fn_0449D
-```
-
-`fn_19767` is `fread(ptr, size, nmemb, stream)`. So that is **file data**, not
-corruption: `BTNS.ACT` contains 13,212 bytes of `0xF5` -- its transparent colour
--- and the watch counted 13,222 `0xF5` writes into the heap. The file loads
-correctly too: 120 reads of 512 bytes for 61,041 bytes is the whole thing.
-
-### What is actually happening
-
-Block layout, from the manager itself at `0x2F0C3`:
-
-```
-+0  previous block segment      +4  handle index
-+2  size in paragraphs          +8  flags
-```
-
-and at `0x2F13D`, `mov si, es / inc si` -- **a block's data starts one paragraph
-after its header**. That checks out against the read trace: block 20 is at
-`6C05` with size `0x21` (header + 512 bytes) and every `btns.act` read lands at
-`6C06:0000`, exactly one paragraph on.
-
-`DINO_HEAPTRACE` records writes to `+2` fields as well as reads, and the last
-real header write in a whole run is:
-
-```
-[hdrw]  ... 3F51=06  6C26=21
-```
-
-After `6C26=21` the game **never writes another block header** -- but it keeps
-using memory, writing decoded sprite data as far as `0x7B23`. (Everything after
-that point in the trace is pixel data that happens to land on an address ending
-in 2; the filter cannot tell those apart.)
-
-So the failure is:
-
-1. The chain the game builds ends at block `6C26`, size `0x21`.
-2. The game then uses memory from `0x6C47` upward without recording blocks there.
-3. The compactor walks the chain, steps `6C26 + 0x21` to `0x6C47`, finds sprite
-   data, reads `F5F5` as a size, wraps backwards to `0x623C`, and loops forever.
-
-Corrections worth keeping, since each of these looked true and was not: the
-`0xF5` is `BTNS.ACT`'s transparent colour, not a poison or corruption; the
-repeated reads to one address are a buffered `fread` refilling its 512-byte
-buffer, and 120 of them for a 61,041-byte file is a complete, healthy load; and
-the file is not loaded at `0x6C47` at all -- the only `"UNC2"` signatures in
-memory are the constant in DGROUP and a copy of the header in a **stack** local
-at `0x3EF70`.
-
-### The compactor breaks the chain it is walking
-
-`chain_check()` verifies the invariant -- walking from `ds:[742A]` by size must
-land exactly on `ds:[742E]` -- after every write to a block size field. The
-chain is *legitimately* inconsistent while the manager edits it: a 16-bit store
-arrives as two byte writes, and headers are cleared before they are filled. So
-the first break means nothing. What matters is the last write after which it
-never became consistent again, and that is what the runtime reports:
-
-```
-[chain] last write leaving it broken: 6C263 = 00; walk stops at 6C47
-        (first=400B last=9000)
-[chain]     fn_00000 fn_0C6A6 fn_0CDDB fn_0D885 fn_2F0C3 fn_2F0CD
-```
-
-`6C263` is the high byte of block `6C26`'s size, completing `0x0021`. And
-`fn_2F0CD` is **the compactor** -- the same routine that then hangs walking the
-chain. It breaks its own bookkeeping and immediately spins on the result.
-
-The relevant code is its move-and-merge path:
-
-```
-2F112  mov dx, word es:[0x2]      current block's size
-2F11F  mov cx, word ds:[0x2]      next block's size
-2F138  call 0x091F                memmove the next block down over this one
-2F13F  inc si                     data pointer = block + 1 paragraph
-2F14A  mov word es:[di+0x2], si   update the handle to point at it
-2F153  add ax, word es:[0x2]      where the new free block goes
-2F15F  mov word es:[0x2], dx      ...and its size
-2F18F  add word es:[0x2], ax      elsewhere: merge with the following free block
-```
-
-Whether the defect is in our lift of that arithmetic or in the state it is
-handed is still open. But the compactor can be *tested* rather than argued
-about: it is an optimisation, the game was handed 324 KB, and the chain shows a
-0x2300-paragraph free block, so there should be room to go on without it.
-`fn_2F0C3` is overridden to do nothing, as a probe.
-
-The answer is unambiguous. With compaction disabled the boot goes from stopping
-at `btns.act` to running the whole opening sequence:
-
-```
-open 'blueprnt.act' -> ok     open 'credits.pic'  -> ok
-open 'mecc.act'     -> ok     open 'meccharp.abt' -> ok
-[VGA] UNCHAINED (Mode X)
-[fb]  DAC palette programmed
-[vga] 64000 of 64000 pixels non-zero (Mode X)
-```
-
-The MECC logo, the credits screen, the blueprint art and the MECC harp sting --
-DinoPark's intro. It programs the DAC, and it writes a full screen through the
-Mode X plane path. So the compactor was the only thing standing between the
-runtime and the game's own intro, and everything under it works.
+The leak is gone, and the run now ends with **exit code 0** rather than 120.
 
 ### Where it stops now
 
-It still does not show a picture. Two things are true at once:
+DinoPark reads its configuration, brings up stubbed sound, enters Mode X, and
+loads its whole opening sequence -- `font.pic`, `vars.dat`, `btns.act`,
+`blueprnt.act`, `credits.pic`, `mecc.act`, `meccharp.abt` -- programs the DAC,
+and writes a full screen through the plane path. It exits cleanly.
 
-- The frame is **uniform**. `vga_sample()` keeps the most colourful frame seen,
-  sampled at 18.2 Hz from the BIOS-clock thread, and reports that no frame with
-  any variety was ever displayed -- the screen is index 255 throughout. The game
-  composes offscreen and has not blitted.
-- `fb_scan()`'s best picture-shaped candidate is still loaded asset data rather
-  than a composed screen, so the offscreen buffer either is not built yet or does
-  not look like a bitmap to the scorer.
+It still shows no picture, and the next two things are known:
 
-And the run ends in Borland's `Stack overflow!` with exit code 120, so there is
-still an SP problem further in -- one the audit did not name earlier because the
-boot never got this far.
+- **`fn_09DC7`** is now the first SP violation, at -10 a call. It is the planar
+  sprite blitter `docs/SPRITES.md` describes: `out dx, al` to the Sequencer Map
+  Mask, `rol bl, cl` masks, CS-resident scratch at `cs:[0xA]` and `cs:[0x14]`.
+  Hand-written assembly, and it is running precisely because the intro is
+  drawing. (Its BP-clobber flag is a false positive -- it uses BP as a data
+  register, not a frame pointer.)
+- **The frame stays uniform.** `vga_sample()` watches at 18.2 Hz and never sees
+  variety, so the intro composes offscreen and the blit either does not happen
+  or goes somewhere `fb_scan()` does not recognise.
 
-The next questions, in order: what does the intro draw into, and why does SP go
-out of range once the sequence runs. `-DDINO_SPCHECK` will answer the second
-directly now that the code reaches it.
+Both point at the same place: the sprite blitter is the next thing to get right,
+and unlike the heap it is a routine whose output we can already check --
+`tools/decode_act.py` renders `ALBERT.ACT` correctly, so there is a reference
+for what it should produce.
 
 ## The segment map
 
