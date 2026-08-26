@@ -262,40 +262,70 @@ call targets are carved into their own functions -- a target below `first_det`
 has no containing detected function, so `valid_boundary` could never accept one
 and four of them were becoming stubs that swallowed `_exit`'s frame.
 
-### Where it stops now
+### Where it stops now, and the harness that pins it there
 
-The boot is clean. No corruption, no spurious output, and it terminates the way
-the program asks to:
+The boot is clean -- no corruption, no spurious output -- and it terminates the
+way the program asks to:
 
 ```
 attr 'product.pf' -> exists     open 'product.pf' -> ok
 attr 'dino.cfg'   -> exists     INT 10h set mode 03     exit code 0
 ```
 
-It is quitting **on purpose**, in its sound-configuration path. The exit chain
-is `fn_0C6A6 -> fn_196CF -> fn_0F4FE -> fn_01604 -> fn_015AD -> fn_0016B`, and
-`fn_0C6A6` is the config-file locator: it builds a path in a stack buffer with
-`strcpy`/`strcat` from `'dino.cfg'`, `'config.exe'` and an empty string, checks
-it, and on failure formats
+It quits **on purpose**, in its sound-configuration path. `fn_0C6A6` is the
+config-file locator: it builds a path in a stack buffer, tests it, and on
+failure formats one of
 
 ```
-DGROUP:3EC5   "Unable to create configuration file '%s'.
-"
+DGROUP:3EC5   "Unable to create configuration file '%s'."
 DGROUP:57D9   "%s: file not Found"
 ```
 
-Both are reachable from there. What is left on the stack at exit is
-`": file not Found"` -- with an **empty filename**, so the buffer those string
-routines were supposed to fill is still empty when it is used. `fn_05E79` and
-`fn_05DCD` (the `strcpy`/`strcat`) are both lifted and called properly, so the
-next question is what the path-producing call above them returns.
+What is left on the stack at exit is `": file not Found"` -- an **empty `%s`**.
+So the failure is in the formatting itself, not in the file logic.
 
-Worth knowing for that hunt: `DINO.CFG` is 20 bytes, `"SBPRO.COM
-SBPFM.ADV
-"`
--- the Sound Blaster Pro driver names -- and both of those files are present in
-`original/`. `PRODUCT.PF` is MECC's product record (copyright, address,
-"DinoPark Tycoon"), not a file index.
+That runs through `fn_05BE8` (`sprintf`) into `fn_01DBD`, the printf core whose
+format dispatch is the 24-entry switch. `src/test_sprintf.c` drives it directly:
+
+```
+scriptsuild_test.ps1 sprintf                        # default format
+scriptsuild_test.ps1 sprintf DINOPARK.EXE "%s!" HI  # or your own
+```
+
+One second instead of a whole boot, and it reproduces the real failure exactly.
+Its current verdict:
+
+```
+fmt  = %s: file not Found
+arg  = DINO.CFG
+out  = "cvbnm,./!@#$%^&*()_+ QWERTYUIOP{}"
+FAIL: %s produced nothing
+```
+
+The output is a keyboard-layout table that lives at **DGROUP:0x0100** -- and it
+is byte-identical whatever format string is passed, including one with no `%s`
+in it at all. So the core is not reading the caller's format; it is reading a
+fixed address, with the right offset and the wrong segment.
+
+The calling convention is **not** the problem, which is worth recording so the
+next pass does not re-derive it:
+
+- `fn_01DBD` is a NEAR function. Its epilogue is at `0x2248`,
+  `pop di / pop si / mov sp, bp / pop bp / ret 0x0C`, and the jump table starts
+  immediately after it at `0x2250` -- which is why the analyzer's linear decode
+  runs off into nonsense past that point, and why the detected end (`0x2280`) is
+  too generous.
+- `fn_05BE8` calls it with `E8` -- a near call, no `push cs` -- and the lifter
+  pushes the matching 2-byte sentinel. `ret 0x0C` clears the twelve bytes of
+  arguments it pushes.
+- The frame therefore has arg1 at `[bp+4]`, and `les si, [bp+6]` at `0x1E2D`
+  loads the format far pointer into `ES:SI` correctly.
+- The `les` lift itself reads both words through temps before writing either
+  register, which is right.
+
+So: correct convention, correct frame, correct `les`, and the wrong segment ends
+up in ES anyway. That is the next thing to chase, and the harness makes each
+attempt cost a second.
 
 ## The segment map
 
