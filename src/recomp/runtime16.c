@@ -435,6 +435,9 @@ void vga_best_dump(const char *path)
     if (r) { fwrite(g_best_pal, 1, sizeof g_best_pal, r); fclose(r); }
 }
 
+/* The composed screen, for harnesses that want to check where pixels landed. */
+const uint8_t *vga_compose_frame(CPU *cpu) { return vga_frame(cpu); }
+
 void vga_flush(CPU *cpu)
 {
     if (!g_vga_live) return;
@@ -629,6 +632,14 @@ uint8_t port_in8(CPU *cpu, uint16_t port) {
 
 void port_out8(CPU *cpu, uint16_t port, uint8_t val) {
     (void)cpu;
+    /* DINO_PORTTRACE: the Sequencer traffic, in order. Deducing what the
+     * blitter writes to the Map Mask from its instruction stream has been
+     * unreliable; this just records it. */
+    { static int t = -1;
+      if (t < 0) t = getenv("DINO_PORTTRACE") ? 1 : 0;
+      if (t && (port == 0x3C4 || port == 0x3C5))
+          fprintf(stderr, "[port] %03X <- %02X%s\n", port, val,
+                  port == 0x3C5 && g_seq_index == 2 ? "   (map mask)" : ""); }
     switch (port) {
         case 0x43:                       /* PIT control: latch counter 0 */
             if ((val & 0xC0) == 0x00) { g_pit_latch = pit_counter(); g_pit_hi = 0; }

@@ -432,46 +432,70 @@ was the right probe rather than a papering-over:
 107 blocks, chaining cleanly from `first` to `last`, and the invariant check
 never fires. The allocator is fine on its own; only the compactor broke it.
 
-### Narrowing the blit
+### A harness for the blitter
 
-The glyphs draw compressed, so the runtime now accounts for plane traffic --
-writes rather than occupancy, since overwrites hide in occupancy -- and reports
-what the Map Mask was for each:
+`src/test_blit.c` drives the row plotter directly, the way `src/test_sprintf.c`
+does for `sprintf`:
 
 ```
-[plane] 0: 194 set, 3 distinct, 241999 writes
-[plane] 1:  38 set, 2 distinct, 241574 writes
-[plane] 2:  43 set, 3 distinct, 241579 writes
-[plane] 3:  46 set, 2 distinct, 241582 writes
-[plane] blitter cs:[0x14] = 0000
-[plane] mask 1: 463   mask 2: 38   mask 4: 43   mask 8: 46
-[plane] mask F: 241536
+scriptsuild_test.ps1 blit [width] [x]
 ```
 
-Reading that: mask `F` is the full-screen clears, and the four single-plane
-masks are the blit itself. Several things are ruled out by it --
+`fn_09DC7` takes an x in `CX`, a width in `BL`, a pixel stream at `DS:SI`, and
+works out `DI` from `x/4` plus the row base it keeps at `cs:[0x0A]`. It expects
+`DX` already pointing at the Sequencer data port `0x3C5` -- the outer blitter
+leaves it there, and without it every write goes to whatever the Map Mask
+happened to be, which is all four planes at once.
 
-- **No writes are dropped.** Mask low-nibble 0 never appears, so the mask never
-  walks onto a value selecting no plane.
-- **The mask rotation is right.** `cs:[0x14]` is zero, which is the branch that
-  duplicates the plane bit into the high nibble, giving `11/22/44/88` -- the
-  sequence that carries out after exactly four shifts. Without it the mask would
-  pass through four values that select nothing.
-- **All four planes are reached.**
+Feed it `1,2,3,...` and the answer is obvious: pixel *n* must land in column
+*x+n*. That is the whole test, and it fails loudly.
 
-What is left is a real imbalance: **463 writes under plane 0's mask against
-about 40 for each of the others**, which is the compression showing up in the
-numbers. Either the per-plane count is wrong for the first pass, or plane 0's
-pass runs for many blits where the others run for one.
+### What it caught
 
-The way to settle that is the harness pattern `src/test_sprintf.c` established:
-drive the blitter directly on `ALBERT.ACT` and diff its planes against
-`tools/decode_act.py`, which renders the same sprite at 585/585 pixels from the
-same control encoding. Unlike everything in the heap, this has a known-correct
-answer to compare against. The outer entry is `fn_09ACB`
-(`FUN_091d_08fb` -- note the doc says `191d`, but the code is at image
-`0x091D0 + 0x8FB`), taking a far pointer at `[bp+6]` and words at `[bp+0xA]`
-through `[bp+0x1A]`, which is the part still to be pinned down.
+Its first run showed each group of four columns holding one value:
+
+```
+got     1  4  4  4    5  8  8  8    9 12 12 12   13 16 16 16
+wanted  1  2  3  4    5  6  7  8    9 10 11 12   13 14 15 16
+```
+
+Tracing the Sequencer traffic with `DINO_PORTTRACE=1` gave the mask sequence the
+plotter actually used:
+
+```
+[port] 3C5 <- 11   (map mask)
+[port] 3C5 <- 1A   (map mask)
+[port] 3C5 <- 1C   (map mask)
+[port] 3C5 <- 1E   (map mask)
+```
+
+It should be `11 22 44 88`. And `0x1A` is `0x0D << 1`, where `0x0D` is 13 -- the
+last pixel copied in the first pass.
+
+The bug was in the compiled-blit rewrite itself. The plane mask lives in `AL`
+between passes and the caller rotates it with `shl al, 1`; the forward block is
+`movsb`, which does **not** touch `AL`, while only the backward block's `lodsb`
+does. The replacement loop set `cpu->al` in both cases, so every forward blit
+overwrote the plane mask with its last pixel value.
+
+With `AL` left alone in the forward case the harness passes for aligned,
+unaligned, odd-width and single-pixel blits, and in the game the plane traffic
+goes from lopsided to even:
+
+```
+before   mask 1: 463   mask 2: 38    mask 4: 43    mask 8: 46
+after    mask 1: 150   mask 2: 147   mask 4: 147   mask 8: 146
+```
+
+The drawn pixels are solid contiguous shapes now rather than scattered dots.
+
+### Where it stops now
+
+Still not a readable screen: the richest frame is a single band of shapes rather
+than the credits or the MECC logo. Whether that is the sampler catching a
+partial draw or the game only ever drawing one band is the next thing to find
+out -- and `vga_sample()` keeping the best frame at 18.2 Hz is probably too
+coarse for a sequence that composes offscreen.
 
 ## The segment map
 

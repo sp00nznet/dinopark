@@ -192,13 +192,17 @@ def patch_compiled_blits(body):
             out.append(line)
             continue
         unit, what = COMPILED_BLITS[base]
-        back = 'di--' if unit == 8 else 'di++'
+        # `movsb` does not touch AL; `lodsb` does. Setting it either way
+        # clobbers the plane mask the caller is rotating in AL between
+        # passes, which silently turns 11/22/44/88 into nonsense.
+        lodsb = (unit == 8)
+        back = 'di--' if lodsb else 'di++'
         out.append(f'    {{ /* compiled blit: {what} */')
         out.append(f'      unsigned _n = (unsigned)((0x{base:X} - cpu->bx) / {unit});')
         out.append( '      while (_n--) {')
         out.append( '          uint8_t _b = mem_read8(cpu, cpu->ds, cpu->si);')
         out.append( '          mem_write8(cpu, cpu->es, cpu->di, _b);')
-        out.append(f'          cpu->al = _b; cpu->{back}; cpu->si += 4;')
+        out.append(f'          {"cpu->al = _b; " if lodsb else ""}cpu->{back}; cpu->si += 4;')
         out.append( '      } }')
         n += 1
     return chr(10).join(out), n
