@@ -84,6 +84,7 @@ static uint8_t g_palette[256][3];
 #define HEAP_HI 0x9F00u
 static uint16_t g_heap_next = HEAP_LO;
 static uint16_t g_dgroup;                  /* from `mov dx, DGROUP` at image 0 */
+static uint16_t g_ail_seq;                 /* handles handed out by AIL 0x704 */
 
 /* Vectors the guest installs. Recorded so a spin waiting on an ISR-updated
  * flag can be told apart from one that is simply looping. */
@@ -738,6 +739,23 @@ void port_out8(CPU *cpu, uint16_t port, uint8_t val) {
     }
 }
 
+/* A 16-bit port access is two consecutive 8-bit ones: AL to the port, AH to
+ * port+1. Mode X sets the Map Mask with `mov ax,(mask<<8)|02; out dx,ax` on
+ * port 3C4, so treating that as a byte write set the index and threw the mask
+ * away -- the four planes drifted out of sync and the title screen came out
+ * shredded into vertical stripes. */
+uint16_t port_in16(CPU *cpu, uint16_t port)
+{
+    uint16_t lo = port_in8(cpu, port);
+    return (uint16_t)(lo | (port_in8(cpu, (uint16_t)(port + 1)) << 8));
+}
+
+void port_out16(CPU *cpu, uint16_t port, uint16_t val)
+{
+    port_out8(cpu, port, (uint8_t)val);
+    port_out8(cpu, (uint16_t)(port + 1), (uint8_t)(val >> 8));
+}
+
 /* Keyboard.
  *
  * The intro sits in a palette fade polling INT 16h AH=1 for a key to skip it,
@@ -1064,9 +1082,15 @@ void int_handler(CPU *cpu, int vec) {
              * thunks. Leaving AX alone returns the function number, which is
              * non-zero -- and fn_09035 polls AIL 0x689 (is anything playing?)
              * until it answers zero, so a no-op stub spins there forever.
-             * With no driver loaded nothing is ever playing: answer zero. */
+             * With no driver loaded nothing is ever playing: answer zero.
+             *
+             * Except 0x704, which registers a sequence and answers with its
+             * handle. Zero there reads as failure: the game printed "Unable to
+             * register music data for file 'DINOCITY.XMI'" and abandoned the
+             * title sequence. Hand back a handle -- nothing dereferences it,
+             * it only has to be non-zero. */
             trace("[AIL] fn=%04X\n", cpu->ax);
-            cpu->ax = 0;
+            cpu->ax = cpu->ax == 0x704 ? ++g_ail_seq : 0;
             cpu->flags &= ~FLAG_CF;
             break;
         case 0x1A: {                                /* BIOS tick count */

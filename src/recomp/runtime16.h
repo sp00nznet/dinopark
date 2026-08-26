@@ -21,6 +21,10 @@ void mouse_int33(CPU *cpu);
 /* x86 port I/O — VGA sequencer/GC/DAC/CRTC live here */
 uint8_t port_in8(CPU *cpu, uint16_t port);
 void    port_out8(CPU *cpu, uint16_t port, uint8_t val);
+/* A word port access covers port and port+1 -- which is how VGA index/data
+ * register pairs are almost always written. */
+uint16_t port_in16(CPU *cpu, uint16_t port);
+void     port_out16(CPU *cpu, uint16_t port, uint16_t val);
 
 /* address-indirect call/jmp dispatch (generated in recomp_dispatch.c) */
 int  recomp_dispatch(CPU *cpu, unsigned seg, unsigned off);   /* 1 = dispatched */
