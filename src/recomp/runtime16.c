@@ -868,9 +868,35 @@ static void key_init(void)
  * does -- which also means a press has to be followed by a release, or the
  * held flag blocks every repeat.
  */
+/* The BIOS-buffer word for a scancode: scancode in AH, ASCII in AL. Only the
+ * handful the game is likely to read that way; anything else comes through as
+ * a scancode with no ASCII, which is what a function key looks like anyway. */
+static uint16_t bios_key_word(uint8_t code)
+{
+    static const struct { uint8_t sc, ch; } map[] = {
+        { 0x39, ' ' }, { 0x1C, '' }, { 0x01, 27 }, { 0x0E, 8 }, { 0x0F, '	' },
+        { 0x02, '1' }, { 0x03, '2' }, { 0x04, '3' }, { 0x05, '4' }, { 0x06, '5' },
+        { 0x07, '6' }, { 0x08, '7' }, { 0x09, '8' }, { 0x0A, '9' }, { 0x0B, '0' },
+        { 0x10, 'q' }, { 0x11, 'w' }, { 0x12, 'e' }, { 0x13, 'r' }, { 0x14, 't' },
+        { 0x15, 'y' }, { 0x16, 'u' }, { 0x17, 'i' }, { 0x18, 'o' }, { 0x19, 'p' },
+        { 0x1E, 'a' }, { 0x1F, 's' }, { 0x20, 'd' }, { 0x21, 'f' }, { 0x22, 'g' },
+        { 0x23, 'h' }, { 0x24, 'j' }, { 0x25, 'k' }, { 0x26, 'l' },
+        { 0x2C, 'z' }, { 0x2D, 'x' }, { 0x2E, 'c' }, { 0x2F, 'v' }, { 0x30, 'b' },
+        { 0x31, 'n' }, { 0x32, 'm' },
+    };
+    for (unsigned i = 0; i < sizeof map / sizeof *map; i++)
+        if (map[i].sc == code) return (uint16_t)((code << 8) | map[i].ch);
+    return (uint16_t)(code << 8);
+}
+
 static void key_inject(CPU *cpu, uint8_t sc)
 {
     uint8_t code = sc & 0x7F;
+    /* Both destinations. The game reads its own ring for gameplay, but it also
+     * calls INT 16h -- nineteen thousand times in forty-five seconds during the
+     * attract sequence -- and that had nothing to give it, because nothing ever
+     * filled the pending word. */
+    if (!(sc & 0x80)) g_key_pending = bios_key_word(code);
     if (sc & 0x80) {                            /* release */
         mem_write8(cpu, g_dgroup, (uint16_t)(0x158 + code), 0);
         return;

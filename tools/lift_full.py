@@ -358,8 +358,16 @@ def main():
     if os.path.exists(miss_path):
         for line in open(miss_path):
             line = line.strip()
-            if line and int(line, 16) not in starts and valid_boundary(int(line, 16)):
-                forced_targets.add(int(line, 16))
+            if not line:
+                continue
+            t = int(line, 16)
+            # 0xFFFF is the sentinel the lifter pushes as a near call's return
+            # address, not somewhere the guest meant to go. It reaches the miss
+            # list whenever something returns through the dispatcher.
+            if t == 0xFFFF:
+                continue
+            if t not in starts and valid_boundary(t):
+                forced_targets.add(t)
 
     # Direct far calls resolve at lift time, so an unresolved one silently
     # becomes an empty stub rather than a runtime miss the convergence loop
