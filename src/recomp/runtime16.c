@@ -1385,12 +1385,18 @@ static void run_guest_isr(CPU *cpu, int vec)
     if ((!seg && !off) || inside) return;
     inside = 1;
 
+#ifdef DINO_SPCHECK
+    { extern int g_recomp_quiet; g_recomp_quiet = 1; }
+#endif
     CPU save = *cpu;
     push16(cpu, cpu->flags);
     push16(cpu, cpu->cs);
     push16(cpu, cpu->ip);
     recomp_dispatch(cpu, seg, off);
     *cpu = save;
+#ifdef DINO_SPCHECK
+    { extern int g_recomp_quiet; g_recomp_quiet = 0; }
+#endif
 
     inside = 0;
 }

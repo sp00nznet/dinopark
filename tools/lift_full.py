@@ -613,6 +613,7 @@ def main():
         if SPCHECK:
             f.write("void recomp_sp_check(unsigned addr, unsigned sp0, unsigned sp1, unsigned bp0, unsigned bp1);\n")
             f.write("void recomp_push(unsigned addr);\n")
+            f.write("extern int g_recomp_quiet;\n")
             f.write("void call_hist_dump(const char *path);\n")
             for n in lifted_names:
                 f.write(f"void {n}__body(CPU *cpu);\n")
@@ -662,9 +663,15 @@ static long g_disp_budget = -1;
 int recomp_dispatch(CPU *cpu, unsigned seg, unsigned off) {
     unsigned addr = ((seg << 4) + off) & 0xFFFFF;
     if (g_disp_trace < 0) g_disp_trace = getenv("DINO_TRACE") ? 1 : 0;
-    if (g_disp_budget < 0) { const char *e = getenv("DINO_BUDGET"); g_disp_budget = e ? atol(e) : 200000; }
+    /* No dispatch budget by default. It was a bring-up guard -- stop the CPU
+     * rather than spin forever on a bad function pointer -- from when a run was
+     * a few seconds of boot. A game being played dispatches indefinitely and
+     * would simply stop partway through. The depth cap below still catches
+     * runaway recursion, and the watchdog catches a genuine hang.
+     * DINO_BUDGET sets one again when bringing up a new path. */
+    if (g_disp_budget < 0) { const char *e = getenv("DINO_BUDGET"); g_disp_budget = e ? atol(e) : 0; }
     if (addr == 0) return 0;                            /* uninitialized fnptr */
-    if (--g_disp_budget <= 0) { cpu->halted = 1; return 0; }
+    if (g_disp_budget && --g_disp_budget <= 0) { cpu->halted = 1; return 0; }
     if (g_disp_depth > 240) { if (g_disp_trace) fprintf(stderr, "[disp] depth cap\\n"); return 0; }
     static long seq = 0; long n = seq++;
     int garbage = (addr > CODE_TOP + 0x2000);   /* target beyond all code = bad ptr */
@@ -740,10 +747,20 @@ void recomp_push(unsigned addr) {
     g_stk_depth++;
 }
 
+/* Set while a guest interrupt handler runs. Its SP delta is not the caller's
+ * business: the runtime pushes the interrupt frame, `iret` lifts to a bare
+ * return that leaves SP alone, and the whole register file is restored
+ * afterwards. DinoPark's INT 8 handler ends `pushf / call far [old vector]`
+ * chaining to a previous handler that does not exist, which the dispatcher
+ * rightly declines -- a reliable -2 every tick, enough to use up the audit's
+ * report cap and hide anything real. */
+int g_recomp_quiet;
+
 void recomp_sp_check(unsigned addr, unsigned sp0, unsigned sp1,
                      unsigned bp0, unsigned bp1) {
     static int fired = 0;
     if (g_stk_depth > 0) g_stk_depth--;
+    if (g_recomp_quiet) return;
     int delta = (int)(short)(unsigned short)(sp1 - sp0);
     int bp_bad = (bp0 != bp1);
     /* A function pops its own return frame: +2 for a near ret, +4 for retf,
