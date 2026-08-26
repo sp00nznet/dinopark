@@ -412,6 +412,17 @@ int recomp_mem_read8(CPU *cpu, uint32_t addr, uint8_t *out)
 static int g_vga_live;
 static uint8_t g_video_mode = 0x03;
 
+/* Wall clock in milliseconds, for pacing things the guest should not set the
+ * rate of. */
+static unsigned long host_ms(void)
+{
+#ifdef _WIN32
+    return (unsigned long)GetTickCount64();
+#else
+    return (unsigned long)(clock() * 1000ULL / CLOCKS_PER_SEC);
+#endif
+}
+
 unsigned long vga_ticks(void)
 {
 #ifdef _WIN32
@@ -686,9 +697,15 @@ uint8_t port_in8(CPU *cpu, uint16_t port) {
             /* The game polls this to pace itself, which makes it the natural
              * place to put a frame on screen. Throttled: the poll spins far
              * faster than anything needs redrawing. */
-            static uint8_t t; static unsigned n;
+            static uint8_t t; static unsigned long last_ms;
             g_port_reads[0]++;
-            if (g_vga_live && ((n++ & 0x3FF) == 0)) vga_flush(cpu);
+            /* Pace on a clock, not a poll count. One flush per 1024 polls came
+             * out at about a frame a second, which is unplayable; how often the
+             * game asks says nothing about how often the screen should change. */
+            if (g_vga_live) {
+                unsigned long now = host_ms();
+                if (now - last_ms >= 16) { last_ms = now; vga_flush(cpu); }
+            }
             t ^= 0x09; return t;
         }
         case 0x40:                       /* PIT counter 0, low byte then high */
@@ -828,11 +845,24 @@ static void key_inject(CPU *cpu, uint8_t sc)
     mem_write16(cpu, g_dgroup, 0x144, next);
 }
 
-/* One press, then its release, one per KEY_PERIOD ticks. */
+/* Real keys as they arrive, then the script.
+ *
+ * The window hands over PC scancodes with 0x80 set on release, which is exactly
+ * what key_inject wants, so a person at the keyboard is playing the game
+ * directly. The script stays for runs with nobody there -- headless, or when
+ * DINO_KEYS names one -- and is what walks the intro along under the harness. */
 static void key_tick(CPU *cpu)
 {
     key_init();
-    if (!g_key_n || !g_dgroup) return;
+    if (!g_dgroup) return;
+
+    for (int k; (k = vga_window_key()) >= 0; )
+        key_inject(cpu, (uint8_t)k);
+
+    static int use_script = -1;
+    if (use_script < 0) use_script = getenv("DINO_KEYS") != NULL || !g_vga_live;
+    if (!use_script || !g_key_n) return;
+
     unsigned long t = vga_ticks();
     if (t - g_key_last_tick < KEY_PERIOD) return;
     g_key_last_tick = t;

@@ -23,6 +23,8 @@ int  vga_window_pump(void);
 /* Pointer position in VGA pixels and a button bitmask (1 left, 2 right).
  * Off-Windows there is no window and no mouse: it reports the origin. */
 void vga_window_mouse(int *x, int *y, int *buttons);
+/* Next key as a PC scancode, 0x80 set on release, or -1 when none is waiting. */
+int  vga_window_key(void);
 
 /* Block until the window is closed (or return at once if there is none). */
 void vga_window_wait(void);

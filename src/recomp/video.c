@@ -66,17 +66,45 @@ void vga_window_mouse(int *x, int *y, int *buttons)
     if (buttons) *buttons = g_mbtn;
 }
 
+/* Keys, as PC scancodes with 0x80 set on release -- which is exactly what the
+ * game's own INT 9 handler expects, and Windows hands us in bits 16..23 of
+ * lParam, so no translation table is needed. Extended keys (the arrows) carry
+ * their unprefixed scancode there, which is the byte the game wants anyway. */
+static uint8_t g_keyq[64];
+static int g_keyq_head, g_keyq_tail;
+
+static void push_key(uint8_t sc)
+{
+    int n = (g_keyq_tail + 1) % (int)(sizeof g_keyq);
+    if (n == g_keyq_head) return;                /* full: drop it */
+    g_keyq[g_keyq_tail] = sc;
+    g_keyq_tail = n;
+}
+
+int vga_window_key(void)
+{
+    if (g_keyq_head == g_keyq_tail) return -1;
+    int v = g_keyq[g_keyq_head];
+    g_keyq_head = (g_keyq_head + 1) % (int)(sizeof g_keyq);
+    return v;
+}
+
 static LRESULT CALLBACK wndproc(HWND w, UINT m, WPARAM wp, LPARAM lp)
 {
     switch (m) {
+        case WM_KEYDOWN: case WM_SYSKEYDOWN:
+            push_key((uint8_t)((lp >> 16) & 0x7F));
+            return 0;
+        case WM_KEYUP: case WM_SYSKEYUP:
+            push_key((uint8_t)(((lp >> 16) & 0x7F) | 0x80));
+            return 0;
         case WM_MOUSEMOVE:   note_mouse(lp, -1); return 0;
         case WM_LBUTTONDOWN: note_mouse(lp, g_mbtn | 1); SetCapture(w); return 0;
         case WM_LBUTTONUP:   note_mouse(lp, g_mbtn & ~1); ReleaseCapture(); return 0;
         case WM_RBUTTONDOWN: note_mouse(lp, g_mbtn | 2); SetCapture(w); return 0;
         case WM_RBUTTONUP:   note_mouse(lp, g_mbtn & ~2); ReleaseCapture(); return 0;
     }
-    if (m == WM_CLOSE || m == WM_DESTROY ||
-        (m == WM_KEYDOWN && wp == VK_ESCAPE)) {
+    if (m == WM_CLOSE || m == WM_DESTROY) {
         g_closed = 1;
         return 0;
     }
@@ -158,5 +186,6 @@ void vga_window_present(const unsigned char *p, const unsigned char *q) { (void)
 int  vga_window_pump(void) { return 0; }
 void vga_window_wait(void) { }
 void vga_window_mouse(int *x, int *y, int *b) { if (x) *x = 0; if (y) *y = 0; if (b) *b = 0; }
+int  vga_window_key(void) { return -1; }
 
 #endif

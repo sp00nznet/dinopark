@@ -31,6 +31,9 @@ if (-not (Test-Path work\dino_boot.exe)) {
     exit 1
 }
 
+# Nobody is at the keyboard under the harness, so ask for the scripted keys
+# that walk the intro along. Without DINO_KEYS the game takes real ones only.
+if (-not $env:DINO_KEYS) { $env:DINO_KEYS = "39" }
 $env:DINO_WATCHDOG = "$Seconds"
 $err = "work\bt$Tag.txt"; $out = "work\bo$Tag.txt"
 $p = Start-Process -FilePath ".\work\dino_boot.exe" -RedirectStandardError $err `
