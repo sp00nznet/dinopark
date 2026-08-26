@@ -314,6 +314,26 @@ def main():
         """
         if data[t + HDR:t + HDR + 3] == b'\x55\x8b\xec':
             return True
+        # The other thing a Borland function opens with: the stack probe,
+        # `cmp word ds:[stack_base], sp / ja +5 / call far <overflow>`,
+        # emitted for a function with no locals to set up. It appears only at
+        # an entry. Registers the function saves come first, so step over any
+        # leading pushes.
+        #
+        # Three game states dispatched to `far` stubs that did nothing because
+        # of this: the addresses sit inside a detected function whose linear
+        # decode desynchronises on embedded data, so the boundary test below
+        # could never line them up.
+        k = t + HDR
+        for _ in range(4):
+            if k + 5 > len(data):
+                break
+            if data[k:k + 2] == b'\x39\x26' and data[k + 4:k + 5] == b'\x77':
+                return True
+            if 0x50 <= data[k] <= 0x57:          # push reg
+                k += 1
+            else:
+                break
         i = _bi.bisect_right(detlist, t) - 1
         if i < 0:
             return False

@@ -1215,53 +1215,60 @@ void mouse_int33(CPU *cpu){ int_handler(cpu, 0x33); }
  * the driver to do it. */
 /* DINO_CLICK: drive the pointer for a run with nobody at the mouse.
  *
- *   DINO_CLICK=x,y[,delay_ms]   hover there, then click once
- *   DINO_CLICK=sweep[,delay_ms] hover-and-click a grid of points in turn
+ *   DINO_CLICK=96,175            hover there, then click
+ *   DINO_CLICK=96,175;160,120    the same, one point after another
+ *   DINO_CLICK=sweep             a grid of twenty, to find what responds
+ *   DINO_CLICK_AT=10000          ms before the first one (default 9000)
+ *   DINO_CLICK_STEP=2400         ms per point
  *
- * The title screen spins on INT 33h function 3 -- twenty million polls in forty
- * seconds -- and does nothing else, so without this a headless run can never
- * leave it. Each point is hovered before the button goes down: the game tracks
- * the pointer itself and a click teleporting in from nowhere is not a gesture
- * it would ever see from a person.
+ * Each point is hovered before the button goes down: the game tracks the
+ * pointer itself, and a click teleporting in from nowhere is not a gesture it
+ * would ever see from a person.
  */
+#define CLICK_MAX   64
 #define CLICK_HOVER 900                        /* ms in place before pressing */
 #define CLICK_HOLD  300                        /* ms held down */
-#define CLICK_STEP  2400                       /* ms per point in sweep */
 
 static void click_script(int *x, int *y, int *b)
 {
-    static int mode = -1, cx, cy, delay;
+    static int n = -1, step = 2400, delay = 9000;
+    static int px[CLICK_MAX], py[CLICK_MAX];
     static unsigned long t0;
-    if (mode < 0) {
+
+    if (n < 0) {
+        n = 0;
         const char *e = getenv("DINO_CLICK");
-        if (!e) { mode = 0; return; }
-        const char *c = strchr(e, ',');
-        if (!strncmp(e, "sweep", 5)) {
-            mode = 2;
-            delay = c ? atoi(c + 1) : 9000;
-        } else {
-            mode = 1;
-            cx = atoi(e);
-            cy = c ? atoi(c + 1) : 100;
-            const char *d = c ? strchr(c + 1, ',') : NULL;
-            delay = d ? atoi(d + 1) : 9000;
+        if (!e) return;
+        { const char *v = getenv("DINO_CLICK_AT");   if (v) delay = atoi(v); }
+        { const char *v = getenv("DINO_CLICK_STEP"); if (v) step  = atoi(v); }
+        while (*e && n < CLICK_MAX) {
+            if (!strncmp(e, "sweep", 5)) {
+                for (int k = 0; k < 20 && n < CLICK_MAX; k++, n++) {
+                    px[n] = 32 + (k % 5) * 64;
+                    py[n] = 25 + (k / 5) * 50;
+                }
+            } else {
+                px[n] = atoi(e);
+                const char *c = strchr(e, ',');
+                py[n] = c ? atoi(c + 1) : 100;
+                n++;
+            }
+            const char *semi = strchr(e, ';');
+            if (!semi) break;
+            e = semi + 1;
         }
         t0 = host_ms();
     }
-    if (!mode) return;
+    if (!n) return;
+
     unsigned long dt = host_ms() - t0;
     if (dt < (unsigned long)delay) return;
     dt -= (unsigned long)delay;
 
-    int px = cx, py = cy, phase = (int)dt;
-    if (mode == 2) {                           /* 5 across, 4 down */
-        int n = (int)(dt / CLICK_STEP);
-        if (n >= 20) return;
-        px = 32 + (n % 5) * 64;
-        py = 25 + (n / 5) * 50;
-        phase = (int)(dt % CLICK_STEP);
-    }
-    *x = px; *y = py;
+    int i = (int)(dt / (unsigned long)step);
+    if (i >= n) i = n - 1;                     /* stay on the last point */
+    int phase = (int)(dt % (unsigned long)step);
+    *x = px[i]; *y = py[i];
     if (phase >= CLICK_HOVER && phase < CLICK_HOVER + CLICK_HOLD) *b = 1;
 }
 
