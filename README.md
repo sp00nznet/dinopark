@@ -116,6 +116,23 @@ in parallel — see [`docs/FORMATS.md`](docs/FORMATS.md) (WIP).
 
 ---
 
+## 📸 What it looks like
+
+Native code, no emulator. Every one of these is the recompiled game running.
+
+| | |
+|---|---|
+| ![Title screen](docs/img/title.png) | ![The credits roll](docs/img/credits.png) |
+| **The title screen** — the park, the logo, and the menu | **The credits**, over an animating park |
+| ![The bank](docs/img/bank.png) | ![Main street](docs/img/mainstreet.png) |
+| **The bank** approves your $5,000 loan | **Main street** — Dino City, the diner, the general store |
+| ![The Real Estate office](docs/img/realestate.png) | ![Choosing a plot](docs/img/plots.png) |
+| **The Real Estate office** — desert $500/acre, plains $1000, marsh $750 | **Choosing a plot** to buy |
+| ![Saved parks](docs/img/loadgame.png) | |
+| **Saved parks**, read straight off the original disk | |
+
+---
+
 ## Status
 
 🎮 **Phase 6 — it plays.**
@@ -228,7 +245,7 @@ emulator, no copyrighted bytes in this repo.
     correctly. The low-level read strips carriage returns in place with
     `es lodsb` (`26 AC`), and lift16 dropped the segment prefix: `lodsb` read
     `DS:SI` instead, DS is DGROUP, SI was zero, and `DGROUP:0000` holds
-    `    Borland C++ - Copyri`. The buffer came out byte-for-byte identical
+    `\0\0\0\0Borland C++ - Copyri`. The buffer came out byte-for-byte identical
     to the start of the data segment. String instructions take their source
     through DS:SI *by default* and the prefix overrides it like any other memory
     reference — only the ES:DI destination is fixed. Big reads go straight to
@@ -318,15 +335,29 @@ subsists, most plausibly with **Houghton Mifflin Harcourt**.
 
 So we play it safe, exactly like our other projects:
 
-- 🚫 **No original game code, executables, art, or audio in this repository.**
-  `original/`, `extracted/`, and `work/` are git-ignored. This repo is tools +
-  our own recompiled source only.
+- 🚫 **No game code, executables, art or audio files in this repository.**
+  `original/`, `extracted/` and `work/` are git-ignored, and so is the lifted
+  C — that is a machine translation of the game's own binary, so we generate it
+  and never ship it. This repo is our tools, our runtime and our documentation.
+  Nothing here will run without your own copy of the game.
+- 🖼️ **Except the screenshots.** `docs/img` holds a handful of captures of the
+  game running, reproduced to show what the project does. They are the one piece
+  of the original work in here, and they are the publisher's, not ours.
 - 🧑‍⚖️ You must **own a copy** of DinoPark Tycoon to use this. Bring your own files.
 - 📨 If you're the current rights holder and want to talk, open an issue. This is
   a non-commercial software-preservation and interoperability effort.
 
 This project is unaffiliated with Manley & Associates, MECC, or Houghton Mifflin
 Harcourt. All trademarks belong to their respective owners.
+
+### 📄 Licence
+
+Everything **we** wrote — the lifter, the runtime, the tools, the scripts, the
+docs — is **[MIT](LICENSE)**. Take it, learn from it, point it at your own
+1993 floppy.
+
+That licence stops at the edge of our own work. DinoPark Tycoon is not ours to
+license, and none of it is here to be licensed.
 
 ---
 
