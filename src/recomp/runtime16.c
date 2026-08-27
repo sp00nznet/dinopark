@@ -8,6 +8,7 @@
 #include "runtime16.h"
 #include "video.h"
 #include "music.h"
+#include "ems.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -23,6 +24,8 @@
 
 /* ---- DOS file handles -> host FILE* ------------------------------------ */
 #define MAXFH 32
+/* A handle for the EMS driver that no real file can be given. */
+#define EMS_FH 30
 static FILE *g_fh[MAXFH];
 static int   g_trace = -1;
 
@@ -1346,6 +1349,14 @@ static void int21(CPU *cpu) {
             break;
         }
         case 0x3D: {                                 /* open file */
+            /* The EMS driver is found by opening it as a character device, not
+             * as a file. Answer for it before the filesystem gets a look, and
+             * hand back a handle the IOCTLs below recognise. */
+            { char nm[32]; read_fname(cpu, cpu->ds, cpu->dx, nm, sizeof nm);
+              if (!strcmp(nm, "EMMXXXX0") && ems_enabled()) {
+                  trace("[INT21] open EMS driver\n");
+                  cpu->ax = EMS_FH; cpu->flags &= ~FLAG_CF; break;
+              } }
             char name[128]; read_fname(cpu, cpu->ds, cpu->dx, name, sizeof name);
             int fh = -1; for (int i = 5; i < MAXFH; i++) if (!g_fh[i]) { fh = i; break; }
             FILE *f = fh >= 0 ? open_game_file(name, "rb") : NULL;
@@ -1356,7 +1367,8 @@ static void int21(CPU *cpu) {
             break;
         }
         case 0x3E: {                                 /* close */
-            int fh = cpu->bx; if (fh >= 0 && fh < MAXFH && g_fh[fh]) { fclose(g_fh[fh]); g_fh[fh] = NULL; }
+            int fh = cpu->bx;
+            if (fh == EMS_FH) { cpu->flags &= ~FLAG_CF; break; } if (fh >= 0 && fh < MAXFH && g_fh[fh]) { fclose(g_fh[fh]); g_fh[fh] = NULL; }
             cpu->flags &= ~FLAG_CF; break;
         }
         case 0x3F: {                                 /* read */
@@ -1415,7 +1427,9 @@ static void int21(CPU *cpu) {
                 fwrite(&cpu->mem[a], 1, n, fh == 2 ? stderr : stdout);
                 fflush(fh == 2 ? stderr : stdout);
             } else if (fh >= 0 && fh < MAXFH && g_fh[fh]) {
-                fwrite(&cpu->mem[a], 1, n, g_fh[fh]);
+                size_t put = fwrite(&cpu->mem[a], 1, n, g_fh[fh]);
+                trace("[INT21] write fh=%d %u bytes from %04X:%04X -> %u\n",
+                      fh, n, cpu->ds, cpu->dx, (unsigned)put);
             }
             cpu->ax = n; cpu->flags &= ~FLAG_CF; break;
         }
@@ -1423,6 +1437,14 @@ static void int21(CPU *cpu) {
             /* Borland's _setupio asks whether each standard handle is a
              * character device, to decide which ones to line-buffer. Report
              * 0..2 as console devices and anything else as a disk file. */
+            if (cpu->bx == EMS_FH) {
+                /* AL=00 wants the device attributes -- bit 7 says character
+                 * device, which is what the probe tests. AL=07 asks whether it
+                 * is ready, where a non-zero AL means yes. */
+                if (cpu->al == 0x07) cpu->ax = 0x00FF;
+                else { cpu->dx = 0x80C0; cpu->ax = cpu->dx; }
+                cpu->flags &= ~FLAG_CF; break;
+            }
             cpu->dx = (cpu->bx <= 2) ? 0x80D3 : 0x0002;
             cpu->ax = cpu->dx;
             cpu->flags &= ~FLAG_CF; break;
@@ -1790,6 +1812,7 @@ void int_handler(CPU *cpu, int vec) {
             }
             break;
         case 0x33: mouse33(cpu); break;
+        case 0x67: ems_int67(cpu); break;         /* expanded memory */
         case 0x66:                                  /* Miles Sound System AIL */
             /* The game binds AIL through 25 little `mov ax,FN / int 66h / retf`
              * thunks. Leaving AX alone returns the function number, which is

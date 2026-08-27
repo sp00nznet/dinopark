@@ -439,6 +439,50 @@ def main():
     # Borland prologue that a handler does not have. Missing the INT 8 entry is
     # why the timer never ran and the game sat in its main loop with the clock
     # stopped.
+    # The tail of the code, past the last function the analyzer found.
+    #
+    # DinoPark's memory manager ends in a run of hand-written assembly with no
+    # Borland prologues, so nothing above 2F831 was ever detected -- and that is
+    # where its storage backends live. The allocator registers three of them in
+    # a table at DGROUP:7442 and reaches them with `call word ds:[si]`, so they
+    # are never named by a direct call either. All three were missing from the
+    # lift, which means the whole paging layer silently did nothing.
+    #
+    # Carve the region the way flow_end ends a single function: a terminator
+    # that nothing decoded so far jumps past is the end of one function, and the
+    # next instruction starts another. That is a fact about the code rather than
+    # a guess about it, which is what "an address something jumped to" was not.
+    n_tail = 0
+    tail_from = max(det_end.values())
+    # DGROUP is where the data starts, so the code cannot run past it. The
+    # startup's first instruction is `mov dx, DGROUP` -- a relocated
+    # immediate at image offset 1.
+    dgroup_img = (data[HDR + 1] | (data[HDR + 2] << 8)) * 16
+    tail_to = dgroup_img if dgroup_img > tail_from else tail_from
+    tail_to = min(len(data) - HDR, tail_to)
+    if tail_to > tail_from:
+        try:
+            tins = Decoder(data[tail_from + HDR:tail_to + HDR],
+                           base_offset=tail_from).decode_all()
+        except Exception:
+            tins = []
+        reach = tail_from
+        nxt = tail_from
+        for ins in tins:
+            o = ins.op1
+            if (ins.mnemonic.startswith(('j', 'loop')) and o
+                    and o.type in (OpType.REL8, OpType.REL16)):
+                reach = max(reach, tail_from + (o.disp & 0xFFFF))
+            term = ins.mnemonic in ('ret', 'retf', 'ret far', 'iret', 'jmp')
+            if nxt and nxt not in starts and nxt not in forced_targets:
+                forced_targets.add(nxt)
+                n_tail += 1
+            nxt = 0
+            if term and ins.offset >= reach:
+                nxt = ins.offset + ins.length
+        if n_tail:
+            print(f"  functions carved from the unclaimed tail: {n_tail}")
+
     n_vec = 0
     vec_path = os.path.join(ROOT, "work", "dino_vectors.txt")
     if os.path.exists(vec_path):
