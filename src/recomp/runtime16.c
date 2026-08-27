@@ -9,6 +9,7 @@
 #include "video.h"
 #include "music.h"
 #include "ems.h"
+#include "digi.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1248,6 +1249,40 @@ static void find_next(CPU *cpu)
 #endif
 }
 
+/* Play a digital effect.
+ *
+ * The digital AIL calls pass a DIGPAK SNDSTRUC in DS:SI -- a far pointer to the
+ * sample at +0, its length at +4, a far pointer to an is-playing flag at +6 and
+ * the rate at +10. The .ABT files on disk are compressed, but the game has
+ * already decompressed the sample into its heap by this point, so following the
+ * pointer is enough and that format never has to be worked out.
+ *
+ * Two calls arrive per effect with the same struct. DIGPAK has a single
+ * channel, so the first one plays and an immediate repeat of the same sample is
+ * ignored rather than cutting itself off.
+ *
+ * The is-playing flag is left alone -- the same reasoning as the music: the
+ * game polls it, and a run should not be paced by whether the host has a sound
+ * card.
+ */
+static void ail_sound(CPU *cpu)
+{
+    uint16_t so = mem_read16(cpu, cpu->ds, cpu->si);
+    uint16_t sg = mem_read16(cpu, cpu->ds, (uint16_t)(cpu->si + 2));
+    uint16_t ln = mem_read16(cpu, cpu->ds, (uint16_t)(cpu->si + 4));
+    uint16_t hz = mem_read16(cpu, cpu->ds, (uint16_t)(cpu->si + 10));
+
+    uint32_t at = seg_off(sg, so);
+    if (!sg || at + ln >= 0xA0000u) return;
+
+    static uint32_t last_at; static uint16_t last_ln; static unsigned long last_ms;
+    if (at == last_at && ln == last_ln && host_elapsed_ms() - last_ms < 250) return;
+    last_at = at; last_ln = ln; last_ms = host_elapsed_ms();
+
+    if (digi_play(&cpu->mem[at], ln, hz))
+        trace("[sfx] %u bytes at %04X:%04X, %u Hz\n", ln, sg, so, hz);
+}
+
 /* Hand the registered sequence to the MIDI player.
  *
  * AIL function 0x704 registers a sequence, and its first far pointer (CX:BX) is
@@ -1831,9 +1866,16 @@ void int_handler(CPU *cpu, int vec) {
              * handle we get on the music: one of them should be the XMI the
              * game just loaded. Show the head of each -- an IFF file announces
              * itself in the first four bytes. */
-            if (cpu->ax == 0x704) {
-                uint16_t p[2][2] = { { cpu->cx, cpu->bx }, { cpu->di, cpu->si } };
-                for (int i = 0; i < 2; i++) {
+            /* Dump the pointer arguments of every AIL call, not just the
+             * sequence registration. Finding the XMI worked by looking at what
+             * 0x704 was handed; the digital side has to be found the same way. */
+            if (cpu->ax == 0x704 || getenv("DINO_AIL_ARGS")) {
+                /* The MIDI side passes CX:BX; the digital calls do
+                 * `lds si, [bp+6]` and pass DS:SI. Show both. */
+                uint16_t p[3][2] = { { cpu->cx, cpu->bx },
+                                     { cpu->ds, cpu->si },
+                                     { cpu->es, cpu->di } };
+                for (int i = 0; i < 3; i++) {
                     char h[64]; int hn = 0;
                     for (int j = 0; j < 12; j++)
                         hn += snprintf(h + hn, sizeof h - hn, "%02X ",
@@ -1847,8 +1889,26 @@ void int_handler(CPU *cpu, int vec) {
                     trace("[AIL]   arg%d %04X:%04X: %s |%s|\n",
                           i, p[i][0], p[i][1], h, t);
                 }
+                /* DS:SI is a DIGPAK SNDSTRUC on the digital calls: a far
+                 * pointer to the sample at +0, its length at +4, a far pointer
+                 * to an is-playing flag at +6, and the rate at +10. Follow it. */
+                {
+                    uint16_t so = mem_read16(cpu, cpu->ds, cpu->si);
+                    uint16_t sg = mem_read16(cpu, cpu->ds, (uint16_t)(cpu->si + 2));
+                    uint16_t ln = mem_read16(cpu, cpu->ds, (uint16_t)(cpu->si + 4));
+                    uint16_t hz = mem_read16(cpu, cpu->ds, (uint16_t)(cpu->si + 10));
+                    if (sg > 0x1000 && sg < 0xA000) {
+                        char h[64]; int hn = 0;
+                        for (int j = 0; j < 12; j++)
+                            hn += snprintf(h + hn, sizeof h - hn, "%02X ",
+                                           mem_read8(cpu, sg, (uint16_t)(so + j)));
+                        trace("[AIL]   sample %04X:%04X len=%u rate=%u: %s\n",
+                              sg, so, ln, hz, h);
+                    }
+                }
             }
             if (cpu->ax == 0x704) ail_register(cpu);
+            if (cpu->ax == 0x68B) ail_sound(cpu);
             cpu->ax = cpu->ax == 0x704 ? ++g_ail_seq : 0;
             cpu->flags &= ~FLAG_CF;
             break;

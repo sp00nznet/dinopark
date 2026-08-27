@@ -24,7 +24,7 @@ if (-not $NoLift) {
     python tools\lift_full.py *> work\lift.log
 }
 if ($Audit) { Remove-Item Env:\DINO_SPCHECK }
-$srcs = @("src\boot.c","src\recomp\cpu.c","src\recomp\runtime16.c","src\recomp\dino_impl.c","src\recomp\video.c","src\recomp\music.c","src\recomp\ems.c")
+$srcs = @("src\boot.c","src\recomp\cpu.c","src\recomp\runtime16.c","src\recomp\dino_impl.c","src\recomp\video.c","src\recomp\music.c","src\recomp\ems.c","src\recomp\digi.c")
 $srcs += (Get-ChildItem "src\recomp\gen\recomp_*.c" | ForEach-Object { $_.FullName })
 # MSVC. $env:VCVARS overrides it; otherwise take the first install that is
 # there, so this is not pinned to one edition on one machine.

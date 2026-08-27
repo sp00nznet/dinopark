@@ -18,7 +18,7 @@ if (-not $vcvars) {
         Where-Object { Test-Path $_ } | Select-Object -First 1
 }
 if (-not $vcvars) { Write-Output "no vcvars64.bat found; set $env:VCVARS"; exit 1 }
-$srcs = @("src\test_$which.c","src\recomp\cpu.c","src\recomp\runtime16.c","src\recomp\dino_impl.c","src\recomp\video.c")
+$srcs = @("src\test_$which.c","src\recomp\cpu.c","src\recomp\runtime16.c","src\recomp\dino_impl.c","src\recomp\video.c","src\recomp\music.c","src\recomp\ems.c","src\recomp\digi.c")
 $srcs += (Get-ChildItem "src\recomp\gen\recomp_*.c" | ForEach-Object { $_.FullName })
 New-Item -ItemType Directory -Force work\obj2 | Out-Null
 Remove-Item "work\test_$which.exe" -ErrorAction SilentlyContinue
