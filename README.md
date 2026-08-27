@@ -213,8 +213,27 @@ game, running as native code. No emulator, no copyrighted bytes in this repo.
   function entries because the containing function embeds data the linear decode
   desynchronises on. Their bytes are `39 26 E4 3D 77` — Borland's stack probe,
   which appears nowhere but an entry. Unresolved stubs: 7 → 2.
-- ⏭️ **Next:** sound (the AIL calls are answered, not played), saving and
-  loading, and a play-through long enough to find what breaks next.
+- 🔎 **Stress-tested, and the biggest bug yet.** A deterministic monkey
+  (`DINO_CLICK=monkey`) clicks at random for as long as a run lasts; a stall
+  report says when the screen stops changing and what was on the stack. Between
+  them they found:
+  - **DOS find-first was unimplemented.** Unhandled INT 21h calls report
+    success, so `findnext` answered "here is another file" forever. That is what
+    the game uses to look for saved parks.
+  - **Every buffered text-mode read returned the first bytes of DGROUP.** The
+    game listed no saved parks although eight sit beside the executable. The
+    validator reads six bytes and compares them with `"DINOSG"`, and the byte it
+    saw was zero — although the DOS read had delivered `44 49 4E 4F 53 47`
+    correctly. The low-level read strips carriage returns in place with
+    `es lodsb` (`26 AC`), and lift16 dropped the segment prefix: `lodsb` read
+    `DS:SI` instead, DS is DGROUP, SI was zero, and `DGROUP:0000` holds
+    `    Borland C++ - Copyri`. The buffer came out byte-for-byte identical
+    to the start of the data segment. String instructions take their source
+    through DS:SI *by default* and the prefix overrides it like any other memory
+    reference — only the ES:DI destination is fixed. Big reads go straight to
+    the caller's buffer and bypass all of this, which is why the art always
+    loaded. The saved games list now.
+- ⏭️ **Next:** sound — the AIL calls are answered, not played.
 
 ---
 
