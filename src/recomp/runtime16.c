@@ -61,6 +61,14 @@ static FILE *open_game_file(const char *name, const char *mode)
 
 /* ---- VGA register state (modelled minimally) --------------------------- */
 static uint8_t g_seq_index, g_gc_index, g_crtc_index;
+/* CRTC registers. The two that matter here are 0x0C/0x0D, the address the
+ * display starts scanning from: Mode X page flipping is done by pointing them
+ * at another part of video memory rather than by copying anything. Dropping
+ * those writes meant always showing page 0 while the game drew page 1 -- half
+ * the screen right, half of it whatever was last left at that address, and the
+ * whole thing alternating as the game flipped. Register 0x13 is the row width,
+ * in case a screen uses a wider logical line than it displays. */
+static uint8_t g_crtc[0x20];
 static uint8_t g_map_mask = 0x0F;          /* sequencer reg 2 */
 static uint8_t g_dac_wr, g_dac_comp;
 static int     g_dac_chan;
@@ -109,6 +117,21 @@ unsigned long g_port_reads[8];   /* 3DA, 3C5, 3CF, 3C9, other */
 static uint8_t g_plane[4][0x10000];
 static int g_chain4 = 1;                   /* mode 13h until told otherwise */
 static uint8_t g_read_plane;               /* Graphics reg 4: read map select */
+/* Graphics Controller registers, and the four latches.
+ *
+ * A VGA read does not just return a byte: it loads one byte from every plane
+ * into a latch. A write in write mode 1 then stores those latches into whichever
+ * planes the Map Mask enables and ignores the byte the CPU wrote entirely. That
+ * is how a Mode X blit moves pixels around video memory -- `rep movsb` copies
+ * four planes at a time, one per latch.
+ *
+ * Without the latches a read returned one plane and the write put that single
+ * byte in all four, so every source pixel came out smeared across the four
+ * pixels of its group. Sprites blitted this way blurred; text drawn directly,
+ * in write mode 0, stayed crisp. */
+static uint8_t g_gc[0x10];
+static uint8_t g_latch[4];
+#define VGA_WRITE_MODE (g_gc[5] & 3)
 static unsigned long g_plane_writes[4];    /* writes, not occupancy: an even
                                             * blit touches each plane equally,
                                             * and overwrites hide in occupancy */
@@ -424,6 +447,12 @@ int recomp_mem_write8(CPU *cpu, uint32_t addr, uint8_t val)
           fprintf(stderr, "[plane] tallies reset\n");
       } }
     g_mask_writes[g_map_mask & 0xF]++;
+    /* Write mode 1 stores the latches, not the byte. */
+    if (VGA_WRITE_MODE == 1) {
+        for (int p = 0; p < 4; p++)
+            if (g_map_mask & (1u << p)) { g_plane[p][off] = g_latch[p]; g_plane_writes[p]++; }
+        return 1;
+    }
     for (int p = 0; p < 4; p++)
         if (g_map_mask & (1u << p)) { g_plane[p][off] = val; g_plane_writes[p]++; }
     return 1;
@@ -485,7 +514,10 @@ int recomp_mem_read8(CPU *cpu, uint32_t addr, uint8_t *out)
 {
     heap_note(addr);
     if (addr < VGA_LOW || addr >= VGA_HIGH || g_chain4) return 0;
-    *out = g_plane[g_read_plane & 3][addr - VGA_LOW];
+    uint32_t off = addr - VGA_LOW;
+    /* Every read latches all four planes, whichever one it answers with. */
+    for (int p = 0; p < 4; p++) g_latch[p] = g_plane[p][off];
+    *out = g_latch[g_read_plane & 3];
     return 1;
 }
 
@@ -530,9 +562,17 @@ static uint8_t g_compose[VGA_W * VGA_H];
 static const uint8_t *vga_frame(CPU *cpu)
 {
     if (g_chain4) return &cpu->mem[VGA_BASE];
+    /* Scan from wherever the CRTC says, not from zero. In byte mode -- which is
+     * what unchaining sets up -- the start address counts one unit per byte per
+     * plane, so it is a plane offset, and the row width is the Offset register
+     * doubled. */
+    unsigned start = ((unsigned)g_crtc[0x0C] << 8) | g_crtc[0x0D];
+    unsigned row   = g_crtc[0x13] ? (unsigned)g_crtc[0x13] * 2 : VGA_W / 4;
     for (int y = 0; y < VGA_H; y++)
-        for (int x = 0; x < VGA_W; x++)
-            g_compose[y * VGA_W + x] = g_plane[x & 3][y * (VGA_W / 4) + (x >> 2)];
+        for (int x = 0; x < VGA_W; x++) {
+            unsigned off = (start + y * row + (unsigned)(x >> 2)) & 0xFFFF;
+            g_compose[y * VGA_W + x] = g_plane[x & 3][off];
+        }
     return g_compose;
 }
 
@@ -868,7 +908,8 @@ uint8_t port_in8(CPU *cpu, uint16_t port) {
             g_pit_hi = !g_pit_hi;
             return g_pit_hi ? (uint8_t)g_pit_latch : (uint8_t)(g_pit_latch >> 8);
         case 0x3C5: return g_map_mask;
-        case 0x3CF: return 0;
+        case 0x3CF: return g_gc[g_gc_index & 0xF];   /* the blitter reads the
+                     * write mode back before setting it */
         case 0x3C9: return 0x3F;
         default: g_port_reads[1]++; return 0xFF;
     }
@@ -900,9 +941,12 @@ void port_out8(CPU *cpu, uint16_t port, uint8_t val) {
             }
             break;
         case 0x3CE: g_gc_index = val; break;
-        case 0x3CF: if (g_gc_index == 4) g_read_plane = val & 3; break;
+        case 0x3CF:
+            g_gc[g_gc_index & 0xF] = val;
+            if (g_gc_index == 4) g_read_plane = val & 3;
+            break;
         case 0x3D4: g_crtc_index = val; break;
-        case 0x3D5: break;
+        case 0x3D5: g_crtc[g_crtc_index & 0x1F] = val; break;
         case 0x3C8: g_dac_wr = val; g_dac_chan = 0; break;
         case 0x3C9:
             g_palette[g_dac_wr][g_dac_chan] = val;
