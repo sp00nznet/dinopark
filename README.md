@@ -33,7 +33,8 @@ Working:
   Mask, the latch registers and the CRTC display start address.
 - **Input works.** Real keyboard and mouse, straight from the window.
 - **Music plays.** The XMI the game registers with Miles goes out of the host's
-  MIDI port.
+  MIDI port, and the digital effects go out of its wave device — unsigned 8-bit
+  PCM at 7–22 kHz, one at a time, the way DIGPAK's single channel worked.
 - **Saved parks load.** The eight that shipped with the game list by name.
 - **The memory manager works** — the game's own allocator, its compactor, its
   block mover and its storage backends, all lifted rather than stubbed.
@@ -44,8 +45,11 @@ Working:
 
 Not working yet:
 
-- **No digital audio.** Only the MIDI music plays; the Miles digital calls are
-  answered but not sounded.
+- **Most sound effects decode wrong.** The digital side is wired up and plays,
+  but `fn_00E50` — the game's own in-place DPCM routine, shared with the sprites
+  — returns the right length and the wrong contents for nine of twelve sounds:
+  four come back flat, four largely untouched. `scriptsuild_test.ps1 abt`
+  reproduces it in a second and writes a `.wav` per sound.
 - **Saving is untested.** Loading works; nothing has written a park back yet.
 
 Health, measured rather than assumed: seven minutes in a park, and four minutes
@@ -180,7 +184,8 @@ was invisible without it.
 | `DINO_DUMPDG=1` | the data segment at exit, to find a variable by a value you know it holds |
 | `DINO_FNTRACE=<offsets>` | registers and the top of the stack either side of a function — the arguments, without guessing an address from SP and a disassembly |
 | `DINO_WATCH=<linear>` | who wrote this byte, with the live call stack |
-| `DINO_MUSIC=0` | silence |
+| `DINO_MUSIC=0`, `DINO_SFX=0` | silence |
+| `DINO_SFX_DUMP=1` | keep every effect played, as a `.wav` |
 | `DINO_EMS=0` | no expanded memory, to see the game run out of conventional |
 
 The screen also reports itself: if it stops changing for thirty seconds the
