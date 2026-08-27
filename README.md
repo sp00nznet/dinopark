@@ -123,8 +123,9 @@ in parallel — see [`docs/FORMATS.md`](docs/FORMATS.md) (WIP).
 From a dusty 1993 floppy to a native executable you can sit down in front of.
 It runs its real Borland startup, plays its whole credit sequence, opens the
 park, and answers the mouse: click, and the bank approves your $5,000 loan.
-Main street, the Real Estate office, the notice board, the General Ledger — the
-game, running as native code. No emulator, no copyrighted bytes in this repo.
+Main street, the Real Estate office, the notice board, the General Ledger, your
+saved parks — the game, running as native code, with its music playing. No
+emulator, no copyrighted bytes in this repo.
 
 - ✅ Rights situation researched (see below) — abandonware; **no game files shipped here**.
 - ✅ Binary triaged: unpacked Borland-C 16-bit DOS exe, **large model**, Miles audio.
@@ -233,7 +234,21 @@ game, running as native code. No emulator, no copyrighted bytes in this repo.
     reference — only the ES:DI destination is fixed. Big reads go straight to
     the caller's buffer and bypass all of this, which is why the art always
     loaded. The saved games list now.
-- ⏭️ **Next:** sound — the AIL calls are answered, not played.
+- 🎵 **Sound.** The AIL calls were answered and nothing was played. Tracing
+  what function 0x704 — register sequence — actually *receives* settled where to
+  start: its first far pointer is the loaded file, `FORM....XDIR` sitting in
+  guest memory. The game had already done the loading; all that was missing was
+  somewhere for the notes to go. `src/recomp/music.c` parses XMI and plays it
+  through the host's MIDI output. XMI is MIDI with two differences, and both
+  matter: delays are a run of bytes below `0x80` whose values add up (chaining
+  while each is `0x7F`), not MIDI's variable-length quantity; and note-on
+  carries a **duration** where a MIDI file would carry a matching note-off later
+  in the stream, so the player owes every note its own. `src/test_xmi.c` checks
+  the invariants — every note-on answered by exactly one note-off, ticks never
+  going backwards, everything in range — and all seven of the game's sequences
+  pass with the counts balancing exactly. It writes a `.mid` per sequence too,
+  because the one thing a check cannot tell you is whether the tune is right.
+- ⏭️ **Next:** play it properly and see what the first real session turns up.
 
 ---
 
