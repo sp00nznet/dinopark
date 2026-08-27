@@ -35,21 +35,23 @@ Working:
 - **Music plays.** The XMI the game registers with Miles goes out of the host's
   MIDI port.
 - **Saved parks load.** The eight that shipped with the game list by name.
-- **The memory manager works** — the game's own allocator, its compactor and its
-  block mover, all lifted rather than stubbed.
+- **The memory manager works** — the game's own allocator, its compactor, its
+  block mover and its storage backends, all lifted rather than stubbed.
+- **Expanded memory works.** The game pages its cold assets out to EMS, the way
+  it would have on a machine with EMM386 loaded; the runtime answers INT 67h
+  with 2 MB behind a page frame at `E000`. Without it a park runs out of
+  conventional memory after a few minutes.
 
 Not working yet:
 
-- **It runs out of memory** a few minutes into a park: `memory err 3 ...
-  bytes=43008 maxblk=43008` — the game asking for exactly the largest free block
-  and being refused. This is the next thing.
 - **No digital audio.** Only the MIDI music plays; the Miles digital calls are
   answered but not sounded.
 - **Saving is untested.** Loading works; nothing has written a park back yet.
 
-Health, measured rather than assumed: a 150-second run clicking at random
-finishes with no dispatch misses, no stack-pointer faults, no stalls, and the
-heap walking cleanly from its first block to its end marker.
+Health, measured rather than assumed: seven minutes in a park, and four minutes
+clicking at random, each finish with no dispatch misses, no stack-pointer
+faults, no stalls, and the heap walking cleanly from its first block to its end
+marker.
 
 ## What it looks like
 
@@ -102,6 +104,17 @@ rather than reasoning about what the code ought to do:
 - **The timer interrupt never ran.** DinoPark hooks INT 8 and drives itself from
   it. The main loop ran, polled the mouse twenty million times, drew its cursor,
   and nothing else ever happened, because for the game no time passed.
+
+**The memory manager's tail was never lifted at all.** The analyzer stops at
+`2F831`, and everything above it is hand-written assembly with no Borland
+prologue to find it by — including the three storage backends the allocator
+registers in a table and reaches with `call word ds:[si]`, so no direct call
+names them either. The lifted program's entire paging layer was absent, not
+stubbed, which is why a park eventually stopped with the game's own
+`memory err 3`. The lifter now carves that region into functions the way it ends
+a single one: a terminator that nothing decoded so far jumps past ends a
+function, and the next instruction starts another. 31 recovered, including the
+EMS routines the game had been unable to reach.
 
 **Two lifter defects** were worth more than the screens they fixed, because both
 were silent and both affected the whole program:
@@ -168,6 +181,7 @@ was invisible without it.
 | `DINO_FNTRACE=<offsets>` | registers and the top of the stack either side of a function — the arguments, without guessing an address from SP and a disassembly |
 | `DINO_WATCH=<linear>` | who wrote this byte, with the live call stack |
 | `DINO_MUSIC=0` | silence |
+| `DINO_EMS=0` | no expanded memory, to see the game run out of conventional |
 
 The screen also reports itself: if it stops changing for thirty seconds the
 runtime says so and prints what was on the stack.
