@@ -49,6 +49,10 @@ if (-not (Test-Path work\dino_boot.exe)) {
 # watchdog cutting the session short. Everything else is a test run.
 if ($Play) {
     if (-not $env:DINO_WATCHDOG) { $env:DINO_WATCHDOG = "86400" }
+    # A session someone is actually playing is the only place the harder bugs
+    # turn up, so it is worth tracing. Combine with -Audit and a screen that
+    # stops changing reports which function it stopped in.
+    if (-not $env:DINO_TRACE) { $env:DINO_TRACE = "1"; $untrace = $true }
     Write-Output "playing - close the window to quit"
 } else {
     # Nobody is at the keyboard under the harness, so ask for the scripted keys
@@ -70,4 +74,5 @@ if ($Play) { $p.WaitForExit() } else {
 }
 Remove-Item Env:\DINO_WATCHDOG
 if ($muted) { Remove-Item Env:\DINO_MUSIC }
+if ($untrace) { Remove-Item Env:\DINO_TRACE }
 Write-Output "-> $err"
