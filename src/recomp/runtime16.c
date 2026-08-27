@@ -598,6 +598,33 @@ void vga_flush(CPU *cpu)
  * only ever seen in the exit snapshot. Every software interrupt goes through
  * int_handler and the main loop polls the mouse through it constantly, so
  * calling it from both places covers the whole run. */
+/* A screen that stops changing, reported once with whoever is on the stack.
+ *
+ * A long run that goes quiet is the hardest thing to diagnose after the fact:
+ * the film shows the last frame and nothing about why it is the last one. This
+ * says when the picture stopped moving and what was running at the time. Thirty
+ * seconds, because a player reading a dialog is not a stall. */
+#define STALL_MS 30000
+
+static void stall_note(CPU *cpu, const uint8_t *frame)
+{
+    static unsigned long hash, since;
+    static int said;
+    unsigned long h = 5381;
+    for (unsigned i = 0; i < VGA_W * VGA_H; i += 37) h = h * 33 + frame[i];
+    unsigned long now = host_ms();
+    if (h != hash) { hash = h; since = now; said = 0; return; }
+    if (said || !since || now - since < STALL_MS) return;
+    said = 1;
+    fprintf(stderr, "[stall] the screen has not changed in %lus\n",
+            (now - since) / 1000);
+#ifdef DINO_SPCHECK
+    { extern unsigned g_stk[]; extern int g_stk_depth;
+      for (int i = 0; i < g_stk_depth && i < 12; i++)
+          fprintf(stderr, "[stall]     fn_%05X\n", g_stk[i]); }
+#endif
+}
+
 void vga_flush_paced(CPU *cpu)
 {
     static unsigned long last;
@@ -605,6 +632,7 @@ void vga_flush_paced(CPU *cpu)
     unsigned long now = host_ms();
     if (now - last < 16) return;
     last = now;
+    stall_note(cpu, vga_frame(cpu));
     vga_flush(cpu);
 }
 
@@ -1017,6 +1045,114 @@ void dump_vectors(const char *path)
     fclose(f);
 }
 
+
+/* ---- DOS find-first / find-next ---------------------------------------- */
+/*
+ * The game enumerates files -- looking for saved parks, most likely -- with the
+ * usual dance: AH=2F to remember the current DTA, AH=1A to point it at its own
+ * buffer, AH=4E/4F to search, AH=1A again to put the old one back.
+ *
+ * None of it was implemented, and unhandled INT 21h calls report success. So
+ * findnext answered "here is another file" every time and the caller looped
+ * forever: five minutes of clicking at random froze the park screen exactly
+ * there, in fn_0418B, which is findnext itself.
+ *
+ * DOS returns results through the DTA, 43 bytes the caller owns:
+ *   +00..14  reserved for DOS -- the search state lives here, which is why
+ *            findnext takes no arguments and why the DTA must not move
+ *   +15      attribute   +16 time   +18 date   +1A size (32-bit)
+ *   +1E      the name, ASCIIZ, 8.3
+ *
+ * Windows' own FindFirstFile takes DOS wildcards, so the matching is left to
+ * it rather than written again here.
+ */
+static uint16_t g_dta_seg, g_dta_off;
+
+#define MAXFIND 8
+#ifdef _WIN32
+static HANDLE g_find[MAXFIND];
+#endif
+
+static void dta_store(CPU *cpu, int slot, const char *name,
+                      uint8_t attr, uint32_t size)
+{
+    uint32_t a = seg_off(g_dta_seg, g_dta_off);
+    cpu->mem[a + 0x00] = (uint8_t)slot;           /* our search state */
+    cpu->mem[a + 0x15] = attr;
+    cpu->mem[a + 0x16] = 0; cpu->mem[a + 0x17] = 0;
+    cpu->mem[a + 0x18] = 0x21; cpu->mem[a + 0x19] = 0x1A;   /* 1993-01-01 */
+    for (int i = 0; i < 4; i++) cpu->mem[a + 0x1A + i] = (uint8_t)(size >> (8 * i));
+    int i = 0;
+    for (; i < 12 && name[i]; i++) {
+        char c = name[i];
+        cpu->mem[a + 0x1E + i] = (uint8_t)(c >= 'a' && c <= 'z' ? c - 32 : c);
+    }
+    cpu->mem[a + 0x1E + i] = 0;
+}
+
+static void dos_fail(CPU *cpu, uint16_t err)
+{
+    cpu->ax = err;
+    cpu->flags |= FLAG_CF;
+}
+
+static void find_first(CPU *cpu)
+{
+    char pat[256];
+    read_fname(cpu, cpu->ds, cpu->dx, pat, sizeof pat);
+    trace("[INT21] find first '%s'", pat);
+#ifdef _WIN32
+    int slot = -1;
+    for (int i = 0; i < MAXFIND; i++) if (!g_find[i]) { slot = i; break; }
+    if (slot < 0) { trace(" -> no slots"); trace("\n"); dos_fail(cpu, 18); return; }
+
+    /* Same search path as an open: where we are, then the game directory. */
+    WIN32_FIND_DATAA fd;
+    HANDLE h = FindFirstFileA(pat, &fd);
+    if (h == INVALID_HANDLE_VALUE) {
+        const char *base = pat;
+        if (base[0] && base[1] == ':') base += 2;
+        for (const char *p = base; *p; p++)
+            if (*p == '\\' || *p == '/') base = p + 1;
+        char alt[300];
+        snprintf(alt, sizeof alt, "original/%s", base);
+        h = FindFirstFileA(alt, &fd);
+    }
+    if (h == INVALID_HANDLE_VALUE) { trace(" -> none"); trace("\n"); dos_fail(cpu, 18); return; }
+
+    g_find[slot] = h;
+    const char *nm = fd.cAlternateFileName[0] ? fd.cAlternateFileName : fd.cFileName;
+    dta_store(cpu, slot, nm, (uint8_t)(fd.dwFileAttributes & 0x27), fd.nFileSizeLow);
+    trace(" -> '%s'", nm); trace("\n");
+    cpu->ax = 0;
+    cpu->flags &= ~FLAG_CF;
+#else
+    trace(" -> unsupported"); trace("\n");
+    dos_fail(cpu, 18);
+#endif
+}
+
+static void find_next(CPU *cpu)
+{
+#ifdef _WIN32
+    int slot = cpu->mem[seg_off(g_dta_seg, g_dta_off)];
+    if (slot < 0 || slot >= MAXFIND || !g_find[slot]) { dos_fail(cpu, 18); return; }
+    WIN32_FIND_DATAA fd;
+    if (!FindNextFileA(g_find[slot], &fd)) {
+        FindClose(g_find[slot]);
+        g_find[slot] = NULL;
+        dos_fail(cpu, 18);                      /* no more files */
+        return;
+    }
+    const char *nm = fd.cAlternateFileName[0] ? fd.cAlternateFileName : fd.cFileName;
+    dta_store(cpu, slot, nm, (uint8_t)(fd.dwFileAttributes & 0x27), fd.nFileSizeLow);
+    cpu->ax = 0;
+    cpu->flags &= ~FLAG_CF;
+#else
+    dos_fail(cpu, 18);
+#endif
+}
+
 /* ---- software interrupts ---------------------------------------------- */
 static void int21(CPU *cpu) {
     uint8_t ah = cpu->ah;
@@ -1033,6 +1169,14 @@ static void int21(CPU *cpu) {
                   cpu->al, g_vec_seg[cpu->al], g_vec_off[cpu->al]);
             cpu->es = g_vec_seg[cpu->al]; cpu->bx = g_vec_off[cpu->al];
             break;
+        case 0x1A:                                   /* set the DTA */
+            g_dta_seg = cpu->ds; g_dta_off = cpu->dx;
+            break;
+        case 0x2F:                                   /* get the DTA */
+            cpu->es = g_dta_seg; cpu->bx = g_dta_off;
+            break;
+        case 0x4E: find_first(cpu); break;
+        case 0x4F: find_next(cpu); break;
         case 0x30: cpu->ax = 0x0005; break;          /* DOS version 5.0 */
         case 0x2C: cpu->cx = 0; cpu->dx = 0; break;  /* get time */
         case 0x2A: cpu->cx = 1993; cpu->dh = 1; cpu->dl = 1; break;  /* get date */
@@ -1229,6 +1373,14 @@ void mouse_int33(CPU *cpu){ int_handler(cpu, 0x33); }
 #define CLICK_HOVER 900                        /* ms in place before pressing */
 #define CLICK_HOLD  300                        /* ms held down */
 
+/* DINO_CLICK=monkey[,seed]: click all over the screen for as long as the run
+ * lasts. Not a substitute for knowing the UI -- it is a way to find what breaks
+ * without knowing it, paired with the SP audit, the dispatch misses and the
+ * heap summary, none of which need to understand a screen to notice it went
+ * wrong. */
+static int g_monkey;
+static unsigned g_monkey_seed = 1;
+
 static void click_script(int *x, int *y, int *b)
 {
     static int n = -1, step = 2400, delay = 9000;
@@ -1241,6 +1393,13 @@ static void click_script(int *x, int *y, int *b)
         if (!e) return;
         { const char *v = getenv("DINO_CLICK_AT");   if (v) delay = atoi(v); }
         { const char *v = getenv("DINO_CLICK_STEP"); if (v) step  = atoi(v); }
+        if (!strncmp(e, "monkey", 6)) {
+            g_monkey = 1;
+            { const char *c = strchr(e, ','); if (c) g_monkey_seed = (unsigned)atoi(c + 1); }
+            n = 1;                             /* so the caller keeps calling */
+            t0 = host_ms();
+            return;
+        }
         while (*e && n < CLICK_MAX) {
             if (!strncmp(e, "sweep", 5)) {
                 for (int k = 0; k < 20 && n < CLICK_MAX; k++, n++) {
@@ -1262,6 +1421,20 @@ static void click_script(int *x, int *y, int *b)
     if (!n) return;
 
     unsigned long dt = host_ms() - t0;
+    if (g_monkey) {
+        if (dt < (unsigned long)delay) return;
+        unsigned i = (unsigned)((dt - (unsigned long)delay) / (unsigned long)step);
+        /* Deterministic, so a run that breaks something can be run again. Two
+         * rounds of a cheap mix per point, because consecutive seeds out of a
+         * plain LCG walk the screen in a line rather than covering it. */
+        unsigned h = (i + g_monkey_seed) * 2654435761u;
+        h ^= h >> 13; h *= 1274126177u; h ^= h >> 16;
+        *x = (int)(h % VGA_W);
+        *y = (int)((h >> 8) % VGA_H);
+        int phase = (int)((dt - (unsigned long)delay) % (unsigned long)step);
+        if (phase >= CLICK_HOVER && phase < CLICK_HOVER + CLICK_HOLD) *b = 1;
+        return;
+    }
     if (dt < (unsigned long)delay) return;
     dt -= (unsigned long)delay;
 

@@ -302,7 +302,7 @@ def main():
     detlist = sorted(starts)
     import bisect as _bi
 
-    def valid_boundary(t):
+    def valid_boundary(t, strict=False):
         """t is a real entry point: either a decodable instruction boundary
         inside its containing detected function, or a Borland prologue.
 
@@ -334,6 +334,13 @@ def main():
                 k += 1
             else:
                 break
+        # Past this point the evidence is only that the address lines up with
+        # an instruction, which is true of the middle of every function. A
+        # caller that got the address from a dispatch miss needs more than that:
+        # a miss is any address the guest jumped to, and forcing the tails of
+        # functions reached by indirect jumps unbalances their frames.
+        if strict:
+            return False
         i = _bi.bisect_right(detlist, t) - 1
         if i < 0:
             return False
@@ -386,7 +393,7 @@ def main():
             # list whenever something returns through the dispatcher.
             if t == 0xFFFF:
                 continue
-            if t not in starts and valid_boundary(t):
+            if t not in starts and valid_boundary(t, strict=True):
                 forced_targets.add(t)
 
     # Direct far calls resolve at lift time, so an unresolved one silently
@@ -645,14 +652,20 @@ static void note_miss(unsigned addr) {
     if (g_nmiss < MAXMISS) g_miss[g_nmiss++] = addr;
 }
 void recomp_dump_misses(const char *path) {
-    /* merge with the existing file so the forced-function set grows monotonically
-     * across convergence rounds (a shallow run must not shrink it). */
+    /* Two different things share this file. It is the lifter's work list, so
+     * it merges with what is already there and grows monotonically -- an
+     * address stays forced once it has been forced, and a shallow run must
+     * not shrink the set. But that makes the total useless as a health
+     * signal: an address lifted three rounds ago is still listed and reads as
+     * an outstanding failure. Report what THIS run failed to dispatch too. */
+    int seen_here = g_nmiss;
     FILE *r = fopen(path, "r");
     if (r) { unsigned a; while (fscanf(r, "%x", &a) == 1) note_miss(a); fclose(r); }
     FILE *f = fopen(path, "w"); if (!f) return;
     for (int i = 0; i < g_nmiss; i++) fprintf(f, "%05X\\n", g_miss[i]);
     fclose(f);
-    fprintf(stderr, "[disp] %d cumulative in-range misses -> %s\\n", g_nmiss, path);
+    fprintf(stderr, "[disp] %d missed this run, %d on the list -> %s\\n",
+            seen_here, g_nmiss, path);
 }
 
 /* total dispatch budget: deep init currently runs into garbage function
