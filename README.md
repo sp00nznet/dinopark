@@ -254,14 +254,29 @@ emulator, no copyrighted bytes in this repo.
   comes back marked **SOLD!** and the money reads **$4,500** — a $500 desert
   plot, and the variable agrees. BUY stays greyed out until a plot is selected,
   which is the game being right rather than the recompile being lucky.
-  Some text on those screens renders as solid bars while the rest is crisp, and
-  it is not a bug: both fonts in `font.pic` decode perfectly, and watching a
-  pixel inside each shows the crisp text going through a glyph blitter and the
-  bars through a horizontal-span filler. They are greeked filler — fake
-  newspaper classifieds and fake blueprint annotations, which is what a 1993
-  game draws at 320×200 when real text would not fit.
-- ⏭️ **Next:** run a park long enough to see the simulation tick over — visitors,
-  wages, the monthly books.
+- 🖥️ **The VGA latches — every blitted sprite was smeared four pixels wide.**
+  Watching it run turned up what still frames had not: some things crisp, others
+  "completely blown", and the interface *pulsing*. Two bugs.
+  - **Pulsing was the CRTC.** Writes to the data register at `3D5` were dropped
+    entirely, and `0C`/`0D` are the address the display starts scanning from —
+    Mode X page-flips by pointing them elsewhere, not by copying. So we always
+    showed page 0 while the game drew page 1, alternating as it flipped.
+  - **Smearing was the latches.** The blitter sets VGA **write mode 1**, where a
+    read loads one byte from *every* plane into a latch and a write stores those
+    latches into the enabled planes, ignoring the byte the CPU wrote — that is
+    how a Mode X blit moves four planes at once. We modelled none of it: a read
+    returned a single plane, the write put that one byte in all four, and every
+    source pixel came out spread across the four pixels of its group.
+  I had explained the second one away, deciding the smeared text on the Real
+  Estate corkboard was *greeked filler* because a span filler drew it. It was
+  real text. The office now reads `DESERT — Peaceful and remote. Dry, hot &
+  flat. $500 per acre.`, the plot map says `SELECT A PLOT OF LAND TO PURCHASE`,
+  and the start menu says `NEW GAME / OLD GAME / EXIT TO DOS`. The lesson is
+  about the harness: a still frame every ten seconds cannot see flicker, and
+  "which routine drew these pixels" is not evidence about what they meant.
+- ⏭️ **Next:** the game runs out of memory a few minutes into a park —
+  `memory err 3 ... bytes=43008 maxblk=43008`, asking for exactly the largest
+  free block and failing.
 
 ---
 
