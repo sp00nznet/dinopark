@@ -248,7 +248,20 @@ emulator, no copyrighted bytes in this repo.
   going backwards, everything in range — and all seven of the game's sequences
   pass with the counts balancing exactly. It writes a `.mid` per sequence too,
   because the one thing a check cannot tell you is whether the tune is right.
-- ⏭️ **Next:** play it properly and see what the first real session turns up.
+- 🦕 **It plays properly.** Driven the way a person would rather than at
+  random: new game → the bank approves $5,000 → main street → the Real Estate
+  office → pick a land type → BUY → the plot map → pick a plot → BUY. The plot
+  comes back marked **SOLD!** and the money reads **$4,500** — a $500 desert
+  plot, and the variable agrees. BUY stays greyed out until a plot is selected,
+  which is the game being right rather than the recompile being lucky.
+  Some text on those screens renders as solid bars while the rest is crisp, and
+  it is not a bug: both fonts in `font.pic` decode perfectly, and watching a
+  pixel inside each shows the crisp text going through a glyph blitter and the
+  bars through a horizontal-span filler. They are greeked filler — fake
+  newspaper classifieds and fake blueprint annotations, which is what a 1993
+  game draws at 320×200 when real text would not fit.
+- ⏭️ **Next:** run a park long enough to see the simulation tick over — visitors,
+  wages, the monthly books.
 
 ---
 
