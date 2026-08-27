@@ -39,6 +39,7 @@ static unsigned g_total, g_free;
 static int      g_mapped[EMS_PHYS];       /* logical page in each physical one */
 static unsigned g_handle_pages[EMS_HANDLES];
 static int      g_handle_used[EMS_HANDLES];
+static unsigned g_maps;      /* how many pages were actually swapped in */
 
 int ems_enabled(void)
 {
@@ -76,6 +77,19 @@ static void unmap(CPU *cpu, int phys)
     g_mapped[phys] = -1;
 }
 
+/* What the game did with its expanded memory, for a post-mortem. Allocating a
+ * megabyte and never mapping a page of it is the difference between EMS being
+ * available and EMS being used, and only the second one relieves the heap. */
+void ems_report(void)
+{
+    if (g_on <= 0) { fprintf(stderr, "[ems] not enabled\n"); return; }
+    unsigned held = 0;
+    for (int i = 1; i < EMS_HANDLES; i++) held += g_handle_pages[i];
+    fprintf(stderr, "[ems] %u of %u pages allocated, %u maps, frame holds %d %d %d %d\n",
+            held, g_total, g_maps,
+            g_mapped[0], g_mapped[1], g_mapped[2], g_mapped[3]);
+}
+
 void ems_int67(CPU *cpu)
 {
     if (!ems_enabled()) { cpu->ah = 0x84; return; }   /* no such function */
@@ -97,6 +111,10 @@ void ems_int67(CPU *cpu)
             break;
 
         case 0x43: {                                  /* allocate */
+            /* Trace allocate and map. Detection succeeding says nothing about
+             * whether the game actually pages anything out here, and that is
+             * the whole question when it still runs out of conventional
+             * memory. */
             unsigned want = cpu->bx;
             if (!want)      { cpu->ah = 0x89; break; }  /* zero pages */
             if (want > g_free) { cpu->ah = 0x88; break; } /* not enough */
@@ -108,6 +126,8 @@ void ems_int67(CPU *cpu)
             g_free -= want;
             cpu->dx = (uint16_t)h;
             cpu->ah = 0;
+            fprintf(stderr, "[ems] handle %d: %u pages (%u KB), %u free\n",
+                    h, want, want * 16, g_free);
             break;
         }
 
@@ -132,6 +152,8 @@ void ems_int67(CPU *cpu)
             memcpy(frame(cpu, phys), g_store + (size_t)abs * EMS_PAGE, EMS_PAGE);
             g_mapped[phys] = (int)abs;
             cpu->ah = 0;
+            if (++g_maps <= 8 || (g_maps % 256) == 0)
+                fprintf(stderr, "[ems] map #%u: logical %d -> frame page %d\n", g_maps, log, phys);
             break;
         }
 

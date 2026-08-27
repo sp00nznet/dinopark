@@ -1520,6 +1520,12 @@ static void int21(CPU *cpu) {
               for (int i = 0; i < g_stk_depth && i < 40; i++)
                   fprintf(stderr, "    fn_%05X\n", g_stk[i]); }
 #endif
+            /* And the state that explains a memory failure. The game exits
+             * through here rather than through the watchdog, so without this a
+             * session that ended in its own "memory err" left a screenshot and
+             * nothing about the heap it ran out of. */
+            heap_dump(cpu);
+            ems_report();
             /* The last frame is usually a clear; the interesting one is
              * whatever had the most colour in it. */
             vga_best_dump("work/best_frame.bmp");

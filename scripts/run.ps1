@@ -2,7 +2,8 @@
 # the previous one sitting there, and every "is it built?" check reads it as
 # success, so the run measures a binary from some earlier idea.
 #   scripts\run.ps1 [-Audit] [-Seconds 25] [-Tag 95]
-param([switch]$Audit, [switch]$NoLift, [int]$Seconds = 25, [string]$Tag = "run")
+param([switch]$Audit, [switch]$NoLift, [switch]$Play,
+      [int]$Seconds = 25, [string]$Tag = "run")
 $ErrorActionPreference = "Continue"
 Set-Location (Split-Path $PSScriptRoot -Parent)
 
@@ -44,20 +45,29 @@ if (-not (Test-Path work\dino_boot.exe)) {
     exit 1
 }
 
-# Nobody is at the keyboard under the harness, so ask for the scripted keys
-# that walk the intro along. Without DINO_KEYS the game takes real ones only.
-if (-not $env:DINO_KEYS) { $env:DINO_KEYS = "39" }
+# -Play is a person sitting down with it: real keyboard, sound on, and no
+# watchdog cutting the session short. Everything else is a test run.
+if ($Play) {
+    if (-not $env:DINO_WATCHDOG) { $env:DINO_WATCHDOG = "86400" }
+    Write-Output "playing - close the window to quit"
+} else {
+    # Nobody is at the keyboard under the harness, so ask for the scripted keys
+    # that walk the intro along. Without DINO_KEYS the game takes real ones only.
+    if (-not $env:DINO_KEYS) { $env:DINO_KEYS = "39" }
+}
 # And silence, unless asked otherwise. A test run is something you leave going
 # in another window; it should not play music at whoever is sitting there. The
 # game still registers its sequences either way, so nothing about the run
 # changes -- set DINO_MUSIC=1 to hear it.
-if (-not $env:DINO_MUSIC) { $env:DINO_MUSIC = "0"; $muted = $true }
-$env:DINO_WATCHDOG = "$Seconds"
+if (-not $Play -and -not $env:DINO_MUSIC) { $env:DINO_MUSIC = "0"; $muted = $true }
+if (-not $Play) { $env:DINO_WATCHDOG = "$Seconds" }
 $err = "work\bt$Tag.txt"; $out = "work\bo$Tag.txt"
 $p = Start-Process -FilePath ".\work\dino_boot.exe" -RedirectStandardError $err `
                    -RedirectStandardOutput $out -PassThru -NoNewWindow
-$p.WaitForExit(($Seconds + 45) * 1000) | Out-Null
-if (-not $p.HasExited) { $p.Kill() }
+if ($Play) { $p.WaitForExit() } else {
+    $p.WaitForExit(($Seconds + 45) * 1000) | Out-Null
+    if (-not $p.HasExited) { $p.Kill() }
+}
 Remove-Item Env:\DINO_WATCHDOG
 if ($muted) { Remove-Item Env:\DINO_MUSIC }
 Write-Output "-> $err"

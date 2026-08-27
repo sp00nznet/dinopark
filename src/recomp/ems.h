@@ -15,5 +15,6 @@
 int      ems_enabled(void);
 uint16_t ems_frame_segment(void);
 void     ems_int67(CPU *cpu);
+void     ems_report(void);
 
 #endif
