@@ -150,6 +150,8 @@ static unsigned long g_f5_n;
 static uint32_t g_watch = 0xFFFFFFFFu;
 static int g_watch_fired;
 
+static unsigned long host_ms(void);
+
 static void watch_note(uint32_t addr, uint8_t val)
 {
     static int init;
@@ -159,10 +161,19 @@ static void watch_note(uint32_t addr, uint8_t val)
         if (e) g_watch = (uint32_t)strtoul(e, NULL, 16);
     }
     if (addr != g_watch || g_watch_fired >= 8) return;
+    /* DINO_WATCH_AFTER=<ms>: ignore writes before then. A stack address is
+     * written constantly, so the first eight are whatever ran during startup
+     * and the interesting ones -- the read that should have landed there --
+     * never get reported. */
+    { static long after = -1;
+      if (after < 0) { const char *e = getenv("DINO_WATCH_AFTER"); after = e ? atol(e) : 0; }
+      if (after > 0 && (long)host_ms() < after) return; }
     g_watch_fired++;
     fprintf(stderr, "[watch] %05X write #%d = %02X\n", addr, g_watch_fired, val);
 #ifdef DINO_SPCHECK
-    if (g_watch_fired == 1) {
+    /* Every fire, not just the first: the first write to an address is often
+     * innocent and the one that matters comes later. */
+    {
         extern unsigned g_stk[]; extern int g_stk_depth;
         for (int i = 0; i < g_stk_depth && i < 40; i++)
             fprintf(stderr, "[watch]     fn_%05X\n", g_stk[i]);
@@ -188,7 +199,7 @@ static void stateword_note(CPU *cpu, uint32_t addr, uint8_t val)
         if (e) g_sw_off = (uint16_t)strtoul(e, NULL, 16);
         g_sw_last = 0xFFFF;
     }
-    if (!g_sw_on || !g_dgroup || g_sw_n > 400) return;
+    if (!g_sw_on || !g_dgroup || g_sw_n > 200000) return;
     uint32_t want = seg_off(g_dgroup, g_sw_off);
     if (addr != want && addr != want + 1) return;
     /* The value this write produces, not the one in memory: the hook runs
@@ -1240,8 +1251,33 @@ static void int21(CPU *cpu) {
         case 0x3F: {                                 /* read */
             int fh = cpu->bx; uint16_t n = cpu->cx; uint32_t buf = seg_off(cpu->ds, cpu->dx);
             size_t got = (fh >= 0 && fh < MAXFH && g_fh[fh]) ? fread(&cpu->mem[buf], 1, n, g_fh[fh]) : 0;
-            trace("[INT21] read fh=%d %u bytes -> %04X:%04X (linear %05X..%05X)\n",
-                  fh, n, cpu->ds, cpu->dx, buf, buf + (unsigned)got);
+            /* Show the head of what arrived. A read that returns the right
+             * count and the wrong bytes looks identical in a trace otherwise,
+             * and the first few bytes of a game file are usually its magic. */
+            { char head[32]; int hn = 0;
+              for (unsigned i = 0; i < got && i < 8; i++)
+                  hn += snprintf(head + hn, sizeof head - hn, "%02X ", cpu->mem[buf + i]);
+              head[hn] = 0;
+              trace("[INT21] read fh=%d %u bytes -> %04X:%04X, got %u: %s\n",
+                    fh, n, cpu->ds, cpu->dx, (unsigned)got, head); }
+            /* And the stream the read is filling. Borland's table starts at
+             * DGROUP:7630 with 20-byte entries: level, flags, fd, hold, bsize,
+             * then the far buffer and the far current pointer. A read that
+             * lands the right bytes and leaves `level` at zero is a stream the
+             * library will treat as empty however full the buffer is. */
+            if (g_dgroup && fh >= 0 && fh < MAXFH) {
+                uint16_t f = (uint16_t)(0x7630 + fh * 20);
+                trace("[INT21]   FILE %d: level=%d flags=%04X fd=%d bsize=%u "
+                      "buf=%04X:%04X curp=%04X:%04X\n", fh,
+                      (int16_t)mem_read16(cpu, g_dgroup, f),
+                      mem_read16(cpu, g_dgroup, (uint16_t)(f + 2)),
+                      cpu->mem[seg_off(g_dgroup, (uint16_t)(f + 4))],
+                      mem_read16(cpu, g_dgroup, (uint16_t)(f + 6)),
+                      mem_read16(cpu, g_dgroup, (uint16_t)(f + 10)),
+                      mem_read16(cpu, g_dgroup, (uint16_t)(f + 8)),
+                      mem_read16(cpu, g_dgroup, (uint16_t)(f + 14)),
+                      mem_read16(cpu, g_dgroup, (uint16_t)(f + 12)));
+            }
             cpu->ax = (uint16_t)got; cpu->flags &= ~FLAG_CF; break;
         }
         case 0x42: {                                 /* lseek */

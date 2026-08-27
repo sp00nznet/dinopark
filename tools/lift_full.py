@@ -312,25 +312,32 @@ def main():
         do not line up. `push bp; mov bp, sp` is what the compiler emits and is
         proof enough on its own.
         """
-        if data[t + HDR:t + HDR + 3] == b'\x55\x8b\xec':
-            return True
-        # The other thing a Borland function opens with: the stack probe,
-        # `cmp word ds:[stack_base], sp / ja +5 / call far <overflow>`,
-        # emitted for a function with no locals to set up. It appears only at
-        # an entry. Registers the function saves come first, so step over any
-        # leading pushes.
+        # A Borland function entry, by its prologue. Two forms, and either is
+        # proof on its own -- neither appears anywhere but at a function start:
         #
-        # Three game states dispatched to `far` stubs that did nothing because
-        # of this: the addresses sit inside a detected function whose linear
-        # decode desynchronises on embedded data, so the boundary test below
-        # could never line them up.
+        #   push bp [push si] [push di] / mov bp, sp    -- has locals or args
+        #   [pushes] / cmp [stack_base], sp / ja / call far <overflow>
+        #                                               -- the stack probe, for
+        #                                                  one with none
+        #
+        # Registers the function saves come first in both, so step over any
+        # leading pushes. Missing the multi-push form left a family of
+        # tail-jump thunks unlifted: fn_01736 sets cx and jumps to the shared
+        # body at 01749, which opens `push bp / push si / push di / mov bp,
+        # sp` -- the dispatch found nothing there, so the call did nothing.
+        # Missing the stack-probe form cost three whole game screens.
         k = t + HDR
+        saw_bp = False
         for _ in range(4):
             if k + 5 > len(data):
                 break
             if data[k:k + 2] == b'\x39\x26' and data[k + 4:k + 5] == b'\x77':
                 return True
+            if saw_bp and data[k:k + 2] == b'\x8b\xec':
+                return True
             if 0x50 <= data[k] <= 0x57:          # push reg
+                if data[k] == 0x55:
+                    saw_bp = True
                 k += 1
             else:
                 break
@@ -580,9 +587,9 @@ def main():
                 body = body.replace(f"void {name}(", f"void {name}__body(", 1)
                 wrappers.append(f"void {name}(CPU *cpu) {{"
                                 f" uint16_t _s = cpu->sp, _b = cpu->bp;"
-                                f" recomp_push(0x{io:05X});"
+                                f" recomp_enter(cpu, 0x{io:05X});"
                                 f" {name}__body(cpu);"
-                                f" recomp_sp_check(0x{io:05X}, _s, cpu->sp, _b, cpu->bp); }}")
+                                f" recomp_leave(cpu, 0x{io:05X}, _s, cpu->sp, _b, cpu->bp); }}")
             bodies.append(body)
             all_calls |= lifter.func_calls
             lifted += 1
@@ -618,8 +625,8 @@ def main():
             f.write(f"#define SEG_{sg:04X} 0x{sg:04X}\n")
         f.write("\n")
         if SPCHECK:
-            f.write("void recomp_sp_check(unsigned addr, unsigned sp0, unsigned sp1, unsigned bp0, unsigned bp1);\n")
-            f.write("void recomp_push(unsigned addr);\n")
+            f.write("void recomp_enter(CPU *cpu, unsigned addr);\n")
+            f.write("void recomp_leave(CPU *cpu, unsigned addr, unsigned sp0, unsigned sp1, unsigned bp0, unsigned bp1);\n")
             f.write("extern int g_recomp_quiet;\n")
             f.write("void call_hist_dump(const char *path);\n")
             for n in lifted_names:
@@ -754,7 +761,94 @@ void call_hist_dump(const char *path) {
     fclose(f);
 }
 
-void recomp_push(unsigned addr) {
+static void recomp_push(unsigned addr);
+void recomp_sp_check(unsigned addr, unsigned sp0, unsigned sp1, unsigned bp0, unsigned bp1);
+
+/* DINO_FNTRACE=<offset>[,<offset>...]: what a function was handed and gave
+ * back. A validator that returns the wrong answer looks exactly like one that
+ * was never called, until you can see the value. */
+#define FNT_MAX 8
+static unsigned g_fnt[FNT_MAX];
+static int g_fnt_n = -1;
+
+static int fnt_watched(unsigned addr) {
+    if (g_fnt_n < 0) {
+        g_fnt_n = 0;
+        const char *e = getenv("DINO_FNTRACE");
+        while (e && *e && g_fnt_n < FNT_MAX) {
+            g_fnt[g_fnt_n++] = (unsigned)strtoul(e, NULL, 16);
+            const char *c = strchr(e, ',');
+            if (!c) break;
+            e = c + 1;
+        }
+    }
+    for (int i = 0; i < g_fnt_n; i++) if (g_fnt[i] == addr) return 1;
+    return 0;
+}
+
+/* DINO_FNDUMP=<offset>:<len>: bytes at DS:<offset>, printed either side of a
+ * watched function. Registers say what a routine was handed; a structure it
+ * works through -- a stream, a block header -- is the part you cannot see
+ * without this. */
+static void fnt_dump(CPU *cpu, const char *tag) {
+    /* <offset>:<len> reads through DS; <seg>:<offset>:<len> names the segment,
+     * for a buffer that does not live in the data segment. */
+    static int off = -1, len, seg = -1;
+    if (off < 0) {
+        off = 0;
+        const char *e = getenv("DINO_FNDUMP");
+        if (e) {
+            const char *c1 = strchr(e, ':');
+            const char *c2 = c1 ? strchr(c1 + 1, ':') : NULL;
+            if (c2) {
+                seg = (int)strtoul(e, NULL, 16);
+                off = (int)strtoul(c1 + 1, NULL, 16);
+                len = (int)strtoul(c2 + 1, NULL, 0);
+            } else {
+                off = (int)strtoul(e, NULL, 16);
+                len = c1 ? (int)strtoul(c1 + 1, NULL, 0) : 16;
+            }
+            if (len > 64) len = 64;
+            if (len <= 0) len = 16;
+        }
+    }
+    if (!off && seg < 0) return;
+    uint16_t sg = seg < 0 ? cpu->ds : (uint16_t)seg;
+    fprintf(stderr, "[fn]   %s %04X:%04X:", tag, sg, (unsigned)off);
+    for (int i = 0; i < len; i++)
+        fprintf(stderr, " %02X", mem_read8(cpu, sg, (uint16_t)(off + i)));
+    fprintf(stderr, "\\n");
+}
+
+void recomp_enter(CPU *cpu, unsigned addr) {
+    if (fnt_watched(addr)) {
+        fprintf(stderr, "[fn] %05X in   ax=%04X bx=%04X cx=%04X dx=%04X "
+                        "ds=%04X es=%04X ss=%04X sp=%04X bp=%04X",
+                addr, cpu->ax, cpu->bx, cpu->cx, cpu->dx,
+                cpu->ds, cpu->es, cpu->ss, cpu->sp, cpu->bp);
+        /* And the top of the stack, which is where the arguments are: the
+         * return address first, then the words the caller pushed. Guessing an
+         * argument's address from SP and a disassembly works right up until the
+         * call arrives at a different stack depth. */
+        fprintf(stderr, "  stack:");
+        for (int i = 0; i < 7; i++)
+            fprintf(stderr, " %04X",
+                    mem_read16(cpu, cpu->ss, (uint16_t)(cpu->sp + i * 2)));
+        fprintf(stderr, "\\n");
+        fnt_dump(cpu, "in ");
+    }
+    recomp_push(addr);
+}
+
+void recomp_leave(CPU *cpu, unsigned addr, unsigned sp0, unsigned sp1,
+                  unsigned bp0, unsigned bp1) {
+    if (fnt_watched(addr))
+        { fprintf(stderr, "[fn] %05X out  ax=%04X dx=%04X\\n", addr, cpu->ax, cpu->dx);
+          fnt_dump(cpu, "out"); }
+    recomp_sp_check(addr, sp0, sp1, bp0, bp1);
+}
+
+static void recomp_push(unsigned addr) {
     call_note(addr);
     if (g_stk_depth < MAXSTK) g_stk[g_stk_depth] = addr;
     g_stk_depth++;
