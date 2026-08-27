@@ -13,7 +13,31 @@ Output: src/recomp/gen/recomp_*.c, recomp_all.h, recomp_dispatch.c
 import json, os, sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOLS = r"<pcrecomp>"
+
+
+def _pcrecomp_home():
+    """Where the pcrecomp toolkit lives.
+
+    PCRECOMP_HOME if it is set, otherwise a sibling checkout next to this one --
+    which is how the recomp projects are laid out. Never a hardcoded absolute
+    path: that is one person's drive letter, and it belongs in an environment
+    variable rather than in a public repository.
+    """
+    env = os.environ.get("PCRECOMP_HOME")
+    cands = [env] if env else []
+    cands += [os.path.join(os.path.dirname(ROOT), "tools"),
+              os.path.join(ROOT, "..", "pcrecomp")]
+    for c in cands:
+        if c and os.path.isdir(os.path.join(c, "tools", "disasm")):
+            return os.path.abspath(c)
+    raise SystemExit(
+        "cannot find the pcrecomp toolkit.%s"
+        "Set PCRECOMP_HOME to your checkout of%s"
+        "  https://github.com/sp00nznet/pcrecomp%s"
+        "(looked in: %s)" % (chr(10), chr(10), chr(10), ", ".join(str(c) for c in cands)))
+
+
+TOOLS = _pcrecomp_home()
 sys.path.insert(0, os.path.join(TOOLS, "tools", "disasm"))
 sys.path.insert(0, os.path.join(TOOLS, "tools", "lift"))
 from decode16 import Decoder, OpType  # noqa: E402

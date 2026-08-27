@@ -9,7 +9,15 @@ $rest  = if ($args.Count -gt 1) { $args[1..($args.Count-1)] } else { @() }
 
 if (-not (Test-Path "src\recomp\gen\recomp_000.c")) { python tools\lift_full.py | Out-Null }
 
-$vcvars = "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
+# MSVC. $env:VCVARS overrides it; otherwise take the first install that is
+# there, so this is not pinned to one edition on one machine.
+$vcvars = $env:VCVARS
+if (-not $vcvars) {
+    $vcvars = @("Enterprise","Professional","Community","BuildTools") |
+        ForEach-Object { "${env:ProgramFiles}\Microsoft Visual Studio\2022\$_\VC\Auxiliary\Build\vcvars64.bat" } |
+        Where-Object { Test-Path $_ } | Select-Object -First 1
+}
+if (-not $vcvars) { Write-Output "no vcvars64.bat found; set $env:VCVARS"; exit 1 }
 $srcs = @("src\test_$which.c","src\recomp\cpu.c","src\recomp\runtime16.c","src\recomp\dino_impl.c","src\recomp\video.c")
 $srcs += (Get-ChildItem "src\recomp\gen\recomp_*.c" | ForEach-Object { $_.FullName })
 New-Item -ItemType Directory -Force work\obj2 | Out-Null

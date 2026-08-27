@@ -143,6 +143,11 @@ scripts\build_test.ps1 xmi      # check the XMI parser against all seven tunes
 result with MSVC alongside the runtime, and starts it. Re-run it after any
 change to the lifter. Output lands in `work/`.
 
+Two things it needs to find. The lifter wants the
+[pcrecomp](https://github.com/sp00nznet/pcrecomp) toolkit — set `PCRECOMP_HOME`,
+or keep it as a sibling checkout. The scripts want MSVC, and take the first 2022
+install they find; `$env:VCVARS` overrides that.
+
 The lift is iterative: a run records every address the guest jumped to that had
 no lifted function, and the next lift promotes the ones that carry a Borland
 prologue. It converges — a clean round reports no misses.

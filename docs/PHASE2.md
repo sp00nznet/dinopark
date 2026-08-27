@@ -43,5 +43,5 @@ Cracked the `UNC` container family across all 82 graphics files — see
 1. **LZSP codec** — disassemble `ReadActLZSP` and decode a real sprite to a PNG
    (the verification milestone). A generic LZ/RLE bitmap decoder may be upstreamable.
 2. **Actor script VM** — reverse the bytecode opcode set.
-3. **Ghidra/IDA cross-seed** — far-pointer-aware naming to finish the function map
-   (`<ghidra>`, `<ida>`), then begin lifting the named game-logic functions.
+3. **Ghidra/IDA cross-seed** — far-pointer-aware naming to finish the function
+   map, then begin lifting the named game-logic functions.

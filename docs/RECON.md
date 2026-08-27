@@ -53,11 +53,12 @@ min_alloc=0  max_alloc=0xFFFF
 
 ## Tooling on hand
 
-- **Ghidra** — `<ghidra>` (v12.0.3) + `<ghidra>`.
-  Headless scripts in `pcrecomp/tools/ghidra/`.
-- **IDA** (headless) — `<ida>` (`ida-recomp-toolkit`, `start-ida-mcp.ps1`, `IDA-HEADLESS.md`).
-- **m2c** — `<m2c>`.
-- **pcrecomp toolkit** — `<pcrecomp>` (16-bit disasm/lift, NE/MZ parsers, runtime).
+- **Ghidra** and **IDA**, both driven headlessly, for cross-seeding function
+  bounds and names.
+- **m2c**, for a second opinion on decompiled output.
+- The **[pcrecomp](https://github.com/sp00nznet/pcrecomp) toolkit** — the 16-bit
+  disassembler and lifter, the NE/MZ parsers and the runtime. `tools/lift_full.py`
+  finds it through `PCRECOMP_HOME`, or as a sibling checkout.
 
 ## Next steps (Phase 1)
 

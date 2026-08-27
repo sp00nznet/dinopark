@@ -5,7 +5,15 @@ param([int]$rounds = 6)
 $ErrorActionPreference = "Continue"
 $root = Split-Path $PSScriptRoot -Parent
 Set-Location $root
-$vcvars = "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
+# MSVC. $env:VCVARS overrides it; otherwise take the first install that is
+# there, so this is not pinned to one edition on one machine.
+$vcvars = $env:VCVARS
+if (-not $vcvars) {
+    $vcvars = @("Enterprise","Professional","Community","BuildTools") |
+        ForEach-Object { "${env:ProgramFiles}\Microsoft Visual Studio\2022\$_\VC\Auxiliary\Build\vcvars64.bat" } |
+        Where-Object { Test-Path $_ } | Select-Object -First 1
+}
+if (-not $vcvars) { Write-Output "no vcvars64.bat found; set $env:VCVARS"; exit 1 }
 
 for ($r = 1; $r -le $rounds; $r++) {
     Get-Process dino_boot -ErrorAction SilentlyContinue | Stop-Process -Force
