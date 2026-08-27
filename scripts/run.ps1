@@ -39,6 +39,11 @@ if (-not (Test-Path work\dino_boot.exe)) {
 # Nobody is at the keyboard under the harness, so ask for the scripted keys
 # that walk the intro along. Without DINO_KEYS the game takes real ones only.
 if (-not $env:DINO_KEYS) { $env:DINO_KEYS = "39" }
+# And silence, unless asked otherwise. A test run is something you leave going
+# in another window; it should not play music at whoever is sitting there. The
+# game still registers its sequences either way, so nothing about the run
+# changes -- set DINO_MUSIC=1 to hear it.
+if (-not $env:DINO_MUSIC) { $env:DINO_MUSIC = "0"; $muted = $true }
 $env:DINO_WATCHDOG = "$Seconds"
 $err = "work\bt$Tag.txt"; $out = "work\bo$Tag.txt"
 $p = Start-Process -FilePath ".\work\dino_boot.exe" -RedirectStandardError $err `
@@ -46,4 +51,5 @@ $p = Start-Process -FilePath ".\work\dino_boot.exe" -RedirectStandardError $err 
 $p.WaitForExit(($Seconds + 45) * 1000) | Out-Null
 if (-not $p.HasExited) { $p.Kill() }
 Remove-Item Env:\DINO_WATCHDOG
+if ($muted) { Remove-Item Env:\DINO_MUSIC }
 Write-Output "-> $err"

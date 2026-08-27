@@ -152,6 +152,10 @@ static uint32_t g_watch = 0xFFFFFFFFu;
 static int g_watch_fired;
 
 static unsigned long host_ms(void);
+/* Milliseconds since the run started. host_ms() is the host's uptime, which is
+ * fine for pacing a delta but useless as a threshold: every "after N ms" test
+ * written against it is true on the first call. */
+static unsigned long host_elapsed_ms(void);
 
 static void watch_note(uint32_t addr, uint8_t val)
 {
@@ -168,7 +172,7 @@ static void watch_note(uint32_t addr, uint8_t val)
      * never get reported. */
     { static long after = -1;
       if (after < 0) { const char *e = getenv("DINO_WATCH_AFTER"); after = e ? atol(e) : 0; }
-      if (after > 0 && (long)host_ms() < after) return; }
+      if (after > 0 && (long)host_elapsed_ms() < after) return; }
     g_watch_fired++;
     fprintf(stderr, "[watch] %05X write #%d = %02X\n", addr, g_watch_fired, val);
 #ifdef DINO_SPCHECK
@@ -182,43 +186,56 @@ static void watch_note(uint32_t addr, uint8_t val)
 #endif
 }
 
-/* DINO_STATEWORD=<DGROUP offset>: report a game variable every time it changes.
+/* DINO_STATEWORD=<off>[,<off>...]: report game variables whenever they change.
  *
  * fn_0CDDB is the top-level state machine -- `mov bx,[3C5C] / cmp bx,0x14 /
  * jmp cs:[bx+8AB]`, twenty-one states through a jump table -- so watching that
- * one word says which screen the game thinks it is on, and which transitions it
- * is and is not making. Reported on change rather than on write: a 16-bit store
- * arrives as two bytes and the halfway value is not a state. */
-static uint16_t g_sw_off, g_sw_last;
-static int g_sw_on = -1, g_sw_n;
+ * one word says which screen the game thinks it is on. A list matters when the
+ * question is which of several candidates a variable is: scan a DGROUP dump for
+ * a value you know the game holds (the bank hands over $5,000), then watch
+ * everything that matched and see which one behaves like money.
+ *
+ * Reported on change rather than on write, and reporting the value the write
+ * PRODUCES rather than the one in memory -- the hook runs before the byte
+ * lands, so reading it back shows every 16-bit store a byte behind and each
+ * transition arrives looking like a half-value. */
+#define SW_MAX 8
+static uint16_t g_sw_off[SW_MAX], g_sw_last[SW_MAX];
+static int g_sw_count = -1, g_sw_n;
 
 static void stateword_note(CPU *cpu, uint32_t addr, uint8_t val)
 {
-    if (g_sw_on < 0) {
+    if (g_sw_count < 0) {
+        g_sw_count = 0;
         const char *e = getenv("DINO_STATEWORD");
-        g_sw_on = e != NULL;
-        if (e) g_sw_off = (uint16_t)strtoul(e, NULL, 16);
-        g_sw_last = 0xFFFF;
+        while (e && *e && g_sw_count < SW_MAX) {
+            g_sw_last[g_sw_count] = 0xFFFF;
+            g_sw_off[g_sw_count++] = (uint16_t)strtoul(e, NULL, 16);
+            const char *c = strchr(e, ',');
+            if (!c) break;
+            e = c + 1;
+        }
     }
-    if (!g_sw_on || !g_dgroup || g_sw_n > 200000) return;
-    uint32_t want = seg_off(g_dgroup, g_sw_off);
-    if (addr != want && addr != want + 1) return;
-    /* The value this write produces, not the one in memory: the hook runs
-     * before the byte lands, so reading it back reports each 16-bit store one
-     * byte behind and every transition arrives looking like a half-value. */
-    uint16_t v = mem_read16(cpu, g_dgroup, g_sw_off);
-    v = (addr == want) ? (uint16_t)((v & 0xFF00) | val)
-                       : (uint16_t)((v & 0x00FF) | (val << 8));
-    if (v == g_sw_last) return;
-    g_sw_last = v;
-    g_sw_n++;
-    fprintf(stderr, "[state] %04X = %04X", g_sw_off, v);
+    if (!g_sw_count || !g_dgroup || g_sw_n > 200000) return;
+
+    for (int i = 0; i < g_sw_count; i++) {
+        uint32_t want = seg_off(g_dgroup, g_sw_off[i]);
+        if (addr != want && addr != want + 1) continue;
+        uint16_t v = mem_read16(cpu, g_dgroup, g_sw_off[i]);
+        v = (addr == want) ? (uint16_t)((v & 0xFF00) | val)
+                           : (uint16_t)((v & 0x00FF) | (val << 8));
+        if (v == g_sw_last[i]) return;
+        g_sw_last[i] = v;
+        g_sw_n++;
+        fprintf(stderr, "[state] %04X = %04X (%u)", g_sw_off[i], v, v);
 #ifdef DINO_SPCHECK
-    { extern unsigned g_stk[]; extern int g_stk_depth;
-      for (int i = g_stk_depth - 3; i < g_stk_depth; i++)
-          if (i >= 0) fprintf(stderr, "  <- fn_%05X", g_stk[i]); }
+        { extern unsigned g_stk[]; extern int g_stk_depth;
+          for (int k = g_stk_depth - 3; k < g_stk_depth; k++)
+              if (k >= 0) fprintf(stderr, "  <- fn_%05X", g_stk[k]); }
 #endif
-    fprintf(stderr, "\n");
+        fprintf(stderr, "\n");
+        return;
+    }
 }
 
 /* Every write to a block's size field, in order. Reads tell us the walk the
@@ -395,6 +412,17 @@ int recomp_mem_write8(CPU *cpu, uint32_t addr, uint8_t val)
      * to VGA traffic means the richest moment gets seen whenever it happens. */
     { static unsigned long n; extern void vga_sample(CPU *);
       if ((++n & 0x7FF) == 0) vga_sample(cpu); }
+    /* DINO_MASKRESET=<ms>: zero the plane tallies once, at that point in the
+     * run, so the report at exit covers only what was drawn after it. Totals
+     * over a whole session say nothing about one screen. */
+    { static int done; static long at = -1;
+      if (at < 0) { const char *e = getenv("DINO_MASKRESET"); at = e ? atol(e) : 0; }
+      if (at > 0 && !done && (long)host_elapsed_ms() >= at) {
+          done = 1;
+          memset(g_mask_writes, 0, sizeof g_mask_writes);
+          memset(g_plane_writes, 0, sizeof g_plane_writes);
+          fprintf(stderr, "[plane] tallies reset\n");
+      } }
     g_mask_writes[g_map_mask & 0xF]++;
     for (int p = 0; p < 4; p++)
         if (g_map_mask & (1u << p)) { g_plane[p][off] = val; g_plane_writes[p]++; }
@@ -463,6 +491,14 @@ int recomp_mem_read8(CPU *cpu, uint32_t addr, uint8_t *out)
 
 static int g_vga_live;
 static uint8_t g_video_mode = 0x03;
+
+static unsigned long host_elapsed_ms(void)
+{
+    static unsigned long t0;
+    unsigned long now = host_ms();
+    if (!t0) t0 = now;
+    return now - t0;
+}
 
 /* Wall clock in milliseconds, for pacing things the guest should not set the
  * rate of. */
@@ -1764,8 +1800,26 @@ void int_handler(CPU *cpu, int vec) {
     }
 }
 
+/* DINO_DUMPDG: the whole data segment at exit.
+ *
+ * Watching one word needs its offset, and the way to find a game variable is a
+ * value you know it holds. Scan the dump for it, then point DINO_STATEWORD at
+ * whatever turns up. */
+CPU *g_cpu_for_dump;
+
+void dump_dgroup(const char *path)
+{
+    if (!getenv("DINO_DUMPDG") || !g_dgroup || !g_cpu_for_dump) return;
+    FILE *f = fopen(path, "wb");
+    if (!f) return;
+    fwrite(&g_cpu_for_dump->mem[seg_off(g_dgroup, 0)], 1, 0x10000, f);
+    fclose(f);
+    fprintf(stderr, "[dgroup] %04X:0000 + 64K -> %s\n", g_dgroup, path);
+}
+
 /* ---- image loader (MZ + relocations into image space) ------------------ */
 int dino_load_image(CPU *cpu, const char *path) {
+    g_cpu_for_dump = cpu;
     FILE *f = fopen(path, "rb");
     if (!f) { fprintf(stderr, "cannot open %s\n", path); return -1; }
     fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);

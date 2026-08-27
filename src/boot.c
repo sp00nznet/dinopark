@@ -72,6 +72,7 @@ static DWORD WINAPI watchdog(LPVOID arg) {
 #ifdef DINO_SPCHECK
     { extern void call_hist_dump(const char *); call_hist_dump("work/dino_calls.txt"); }
 #endif
+    { extern void dump_dgroup(const char *); dump_dgroup("work/dgroup.bin"); }
     recomp_dump_misses("work/dino_misses.txt");
     { extern void dump_vectors(const char *); dump_vectors("work/dino_vectors.txt"); }
     _exit(3);
@@ -120,6 +121,7 @@ int main(int argc, char **argv) {
 #ifdef DINO_SPCHECK
     { extern void call_hist_dump(const char *); call_hist_dump("work/dino_calls.txt"); }
 #endif
+    { extern void dump_dgroup(const char *); dump_dgroup("work/dgroup.bin"); }
     recomp_dump_misses("work/dino_misses.txt");
     { extern void dump_vectors(const char *); dump_vectors("work/dino_vectors.txt"); }
     return 0;
