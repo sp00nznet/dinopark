@@ -259,6 +259,7 @@ to talk, open an issue.
 | [SPRITES](docs/SPRITES.md) | Decoding an actor down to the last pixel |
 | [PALETTE](docs/PALETTE.md) | The VGA palette handling |
 | [BOOT](docs/BOOT.md) | Getting the lifted program to start, and what stopped it |
+| [SCREENS](docs/SCREENS.md) | The state machine, the command dispatcher, the shop gate, and how to read what the game is telling the player |
 | [PHASE2](docs/PHASE2.md) / [PHASE4](docs/PHASE4.md) | Naming and assets; the first rendered screen |
 
 ---
