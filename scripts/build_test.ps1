@@ -15,7 +15,7 @@ $srcs += (Get-ChildItem "src\recomp\gen\recomp_*.c" | ForEach-Object { $_.FullNa
 New-Item -ItemType Directory -Force work\obj2 | Out-Null
 Remove-Item "work\test_$which.exe" -ErrorAction SilentlyContinue
 $cl = "cl /nologo /O1 /W0 /DRECOMP_MEM_HOOK /wd4244 /wd4267 /wd4101 /wd4102 /I src /I src\recomp " +
-      ($srcs -join " ") + " /Fe:work\test_$which.exe /Fo:work\obj2\ user32.lib gdi32.lib"
+      ($srcs -join " ") + " /Fe:work\test_$which.exe /Fo:work\obj2\ user32.lib gdi32.lib winmm.lib"
 cmd /c "`"$vcvars`" >nul 2>&1 && $cl" *> work\cl_test.log
 if (-not (Test-Path "work\test_$which.exe")) {
     Write-Output "BUILD FAILED"

@@ -24,11 +24,11 @@ if (-not $NoLift) {
     python tools\lift_full.py *> work\lift.log
 }
 if ($Audit) { Remove-Item Env:\DINO_SPCHECK }
-$srcs = @("src\boot.c","src\recomp\cpu.c","src\recomp\runtime16.c","src\recomp\dino_impl.c","src\recomp\video.c")
+$srcs = @("src\boot.c","src\recomp\cpu.c","src\recomp\runtime16.c","src\recomp\dino_impl.c","src\recomp\video.c","src\recomp\music.c")
 $srcs += (Get-ChildItem "src\recomp\gen\recomp_*.c" | ForEach-Object { $_.FullName })
 $vcvars = "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
 $cl = "cl /nologo /O1 /W0 $defs /wd4244 /wd4267 /wd4101 /wd4102 /I src /I src\recomp " +
-      ($srcs -join " ") + " /Fe:work\dino_boot.exe /Fo:work\obj\ user32.lib gdi32.lib"
+      ($srcs -join " ") + " /Fe:work\dino_boot.exe /Fo:work\obj\ user32.lib gdi32.lib winmm.lib"
 cmd /c "`"$vcvars`" >nul 2>&1 && $cl" *> work\cl.log
 if (-not (Test-Path work\dino_boot.exe)) {
     Write-Output "BUILD FAILED"

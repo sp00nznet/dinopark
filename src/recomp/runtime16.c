@@ -7,6 +7,7 @@
  */
 #include "runtime16.h"
 #include "video.h"
+#include "music.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1164,6 +1165,36 @@ static void find_next(CPU *cpu)
 #endif
 }
 
+/* Hand the registered sequence to the MIDI player.
+ *
+ * AIL function 0x704 registers a sequence, and its first far pointer (CX:BX) is
+ * the loaded file: the trace showed `FORM....XDIR` there. So the game has
+ * already done the loading, and all that is missing is somewhere for the notes
+ * to go.
+ *
+ * Playback starts here, on registration, rather than on whichever call means
+ * "start" -- the game registers and starts in one breath, and this way the
+ * music does not depend on having identified the rest of a driver API that only
+ * exists as twenty-five `mov ax,FN / int 66h` thunks.
+ *
+ * The game is never told anything is playing: AIL 0x689 keeps answering "no",
+ * because the intro polls it and waits, and the run should not be paced by
+ * whether the host has a synthesiser.
+ */
+static void ail_register(CPU *cpu)
+{
+    static uint8_t buf[64 * 1024];
+    uint32_t base = seg_off(cpu->cx, cpu->bx);
+    if (base + 12 >= 0x100000u) return;
+
+    size_t avail = 0x100000u - base;
+    if (avail > sizeof buf) avail = sizeof buf;
+    memcpy(buf, &cpu->mem[base], avail);
+    if (memcmp(buf, "FORM", 4) != 0) return;
+
+    music_play_xmi(buf, avail);
+}
+
 /* ---- software interrupts ---------------------------------------------- */
 static void int21(CPU *cpu) {
     uint8_t ah = cpu->ah;
@@ -1691,7 +1722,30 @@ void int_handler(CPU *cpu, int vec) {
              * register music data for file 'DINOCITY.XMI'" and abandoned the
              * title sequence. Hand back a handle -- nothing dereferences it,
              * it only has to be non-zero. */
-            trace("[AIL] fn=%04X\n", cpu->ax);
+            trace("[AIL] fn=%04X bx=%04X cx=%04X si=%04X di=%04X\n",
+                  cpu->ax, cpu->bx, cpu->cx, cpu->si, cpu->di);
+            /* 0x704 registers a sequence, and its two far pointers are the only
+             * handle we get on the music: one of them should be the XMI the
+             * game just loaded. Show the head of each -- an IFF file announces
+             * itself in the first four bytes. */
+            if (cpu->ax == 0x704) {
+                uint16_t p[2][2] = { { cpu->cx, cpu->bx }, { cpu->di, cpu->si } };
+                for (int i = 0; i < 2; i++) {
+                    char h[64]; int hn = 0;
+                    for (int j = 0; j < 12; j++)
+                        hn += snprintf(h + hn, sizeof h - hn, "%02X ",
+                                       mem_read8(cpu, p[i][0], (uint16_t)(p[i][1] + j)));
+                    char t[16];
+                    for (int j = 0; j < 12; j++) {
+                        uint8_t c = mem_read8(cpu, p[i][0], (uint16_t)(p[i][1] + j));
+                        t[j] = (c >= 32 && c < 127) ? (char)c : '.';
+                    }
+                    t[12] = 0;
+                    trace("[AIL]   arg%d %04X:%04X: %s |%s|\n",
+                          i, p[i][0], p[i][1], h, t);
+                }
+            }
+            if (cpu->ax == 0x704) ail_register(cpu);
             cpu->ax = cpu->ax == 0x704 ? ++g_ail_seq : 0;
             cpu->flags &= ~FLAG_CF;
             break;
